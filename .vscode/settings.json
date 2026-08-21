@@ -1,0 +1,10 @@
+{
+  "files.eol": "\n",
+  "files.encoding": "utf8",
+  "editor.formatOnSave": true,
+  "editor.tabSize": 2,
+  "search.exclude": {
+    "dist": true,
+    "node_modules": true
+  }
+}

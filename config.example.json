@@ -1,0 +1,8 @@
+{
+  "dshRoot": "../deepseek_harness",
+  "dshHome": null,
+  "webPort": 3080,
+  "launcherPort": 5177,
+  "profile": null,
+  "openBrowser": false
+}

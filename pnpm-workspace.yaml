@@ -1,0 +1,6 @@
+# pnpm 11 构建脚本白名单（pnpm 10+ 从 pnpm-workspace.yaml 读取设置）
+allowBuilds:
+  esbuild: true
+
+# 非交互环境跳过模块目录清理确认
+confirmModulesPurge: false

@@ -1,0 +1,241 @@
+import { useCallback, useEffect, useState } from "react";
+import {
+  RefreshCw,
+  Download,
+  Wrench,
+  GitBranch,
+  GitCommit,
+  Package,
+  Tag,
+  CalendarDays,
+  ChevronDown,
+  ChevronUp,
+  AlertTriangle
+} from "lucide-react";
+import { api, type UpdateCheck } from "../api";
+
+type Props = {
+  busy: boolean;
+  setBusy: (b: boolean) => void;
+  deployResult: { ok: boolean; error?: string; target?: string } | null;
+};
+
+function fmtDate(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso : d.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
+}
+
+export function UpdateCard({ busy, setBusy, deployResult }: Props) {
+  const [check, setCheck] = useState<UpdateCheck | null>(null);
+  const [selected, setSelected] = useState("");
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const doCheck = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const r = await api.updateCheck();
+      setCheck(r);
+      if (r.releases.length > 0) setSelected(r.releases[0].tag);
+    } catch (e) {
+      setError(String(e));
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    doCheck();
+  }, [doCheck]);
+
+  // 后端更新完成（SSE deploy 事件，action=update）
+  useEffect(() => {
+    if (deployResult) {
+      if (deployResult.ok) {
+        setNotice(`更新完成！当前：${deployResult.target ?? "最新"}`);
+        setError(null);
+        doCheck();
+      } else {
+        setError(deployResult.error || "更新失败，请查看日志");
+      }
+    }
+  }, [deployResult, doCheck]);
+
+  const apply = async (version: string | null) => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const r = await api.updateApply(version ? { version } : {});
+      if (!r.ok) setError(r.error || "更新启动失败");
+    } catch (e) {
+      setError(String(e));
+    }
+    setBusy(false);
+  };
+
+  const repair = async () => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const r = await api.updateRepair();
+      if (!r.ok) setError(r.error || "修复启动失败");
+    } catch (e) {
+      setError(String(e));
+    }
+    setBusy(false);
+  };
+
+  const cur = check?.current;
+  const isCurrent = (tag: string) => cur?.tag === tag;
+  const bundles = check?.clientBundles;
+  const bundlesBroken = (bundles?.missing.length ?? 0) > 0;
+
+  return (
+    <section className="card deploy-card">
+      <div className="card-head">
+        <div className="card-title">
+          <span className="icon-box">
+            <RefreshCw size={17} />
+          </span>
+          <div>
+            <h2>更新 dsh</h2>
+            <p className="sub">检查 GitHub releases 更新内容 · 选择版本升级（默认最新）</p>
+          </div>
+        </div>
+        <button className="btn btn-ghost btn-sm" onClick={doCheck} disabled={loading}>
+          <RefreshCw size={14} /> 检查更新
+        </button>
+      </div>
+
+      {/* 当前版本 */}
+      <div className="deploy-status">
+        <div className="drow">
+          <span className="drow-label"><GitBranch size={13} /> 当前分支</span>
+          <span className="drow-value mono">{cur?.branch ?? "—"}</span>
+        </div>
+        <div className="drow">
+          <span className="drow-label"><GitCommit size={13} /> 当前提交</span>
+          <span className="drow-value mono">{cur?.commit ?? "—"}</span>
+        </div>
+        <div className="drow">
+          <span className="drow-label"><Tag size={13} /> 最近版本标签</span>
+          <span className="drow-value mono">{cur?.tag ?? "（无标签）"}</span>
+        </div>
+        <div className="drow">
+          <span className="drow-label"><Package size={13} /> package.json 版本</span>
+          <span className="drow-value mono">{cur?.pkgVersion ?? "—"}</span>
+        </div>
+      </div>
+
+      {check?.error && (
+        <div className="error-banner">
+          <span><AlertTriangle size={13} /> Releases 同步失败：{check.error}</span>
+        </div>
+      )}
+
+      {/* 客户端 bundle 健康（bundle script failed to load 的根源） */}
+      {bundles && (
+        <div className={`bundle-health${bundlesBroken ? " broken" : " ok"}`}>
+          <span className="bundle-health-label">
+            {bundlesBroken ? (
+              <><AlertTriangle size={13} /> 客户端 bundle 异常：缺失 {bundles.missing.length}/{bundles.total} 个</>
+            ) : (
+              <>客户端 bundle 完整（{bundles.total} 个）</>
+            )}
+          </span>
+          {bundlesBroken && (
+            <button className="btn btn-danger btn-sm" disabled={busy} onClick={repair} title="clean + 全量重建客户端 bundle">
+              <Wrench size={13} /> 修复客户端构建
+            </button>
+          )}
+        </div>
+      )}
+      {!bundlesBroken && bundles && bundles.total > 0 && (
+        <p className="hint">
+          若浏览器出现 "bundle script ... failed to load"，可手动点击「修复客户端构建」（clean + 全量重建）。
+        </p>
+      )}
+
+      {/* 版本列表 */}
+      <h3 className="section-title">可用版本（GitHub Releases，按发布时间倒序）</h3>
+      {check && check.releases.length === 0 ? (
+        <p className="hint">{check.error ? "无法获取 release 列表" : "暂无可用 release"}</p>
+      ) : (
+        <div className="release-list">
+          {check?.releases.map((r) => (
+            <div
+              key={r.tag}
+              className={`release-item${selected === r.tag ? " selected" : ""}${isCurrent(r.tag) ? " current" : ""}`}
+              onClick={() => setSelected(r.tag)}
+            >
+              <div className="release-head">
+                <input
+                  type="radio"
+                  name="release"
+                  checked={selected === r.tag}
+                  onChange={() => setSelected(r.tag)}
+                  onClick={(e) => e.stopPropagation()}
+                />
+                <span className="release-tag mono">{r.tag}</span>
+                {r.prerelease && <em className="pre-badge">pre-release</em>}
+                {isCurrent(r.tag) && <em className="cur-badge">当前版本</em>}
+                <span className="release-name">{r.name}</span>
+                <span className="release-date"><CalendarDays size={12} /> {fmtDate(r.publishedAt)}</span>
+                <button
+                  className="btn btn-ghost btn-sm expand-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setExpanded(expanded === r.tag ? null : r.tag);
+                  }}
+                  title="展开/收起更新内容"
+                >
+                  {expanded === r.tag ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                </button>
+              </div>
+              {expanded === r.tag && (
+                <div className="release-body">
+                  {r.body.trim() ? <pre>{r.body}</pre> : <p className="hint">（无更新内容）</p>}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="btn-row">
+        <button
+          className="btn btn-primary"
+          disabled={busy || loading || !selected || isCurrent(selected)}
+          onClick={() => apply(selected)}
+          title={isCurrent(selected) ? "当前已是最新选择的版本" : "fetch 指定版本标签 + install + build"}
+        >
+          <Download size={15} /> 更新到 {selected || "…"}
+        </button>
+        <button
+          className="btn btn-ghost"
+          disabled={busy || loading}
+          onClick={() => apply(null)}
+          title="取消固定版本，更新到远端最新 master"
+        >
+          <RefreshCw size={14} /> 更新到最新 master
+        </button>
+        <button
+          className="btn btn-ghost"
+          disabled={busy || loading}
+          onClick={repair}
+          title="不碰 git，clean + 全量重建客户端 bundle（修复 bundle script failed to load）"
+        >
+          <Wrench size={14} /> 修复客户端构建
+        </button>
+      </div>
+      {notice && <div className="notice-banner">{notice}</div>}
+      {error && <div className="error-banner"><span>{error}</span></div>}
+      {busy && <p className="hint">更新执行中… 进度实时显示在下方的服务器日志面板（SSE 推送）。</p>}
+    </section>
+  );
+}
