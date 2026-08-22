@@ -70,6 +70,7 @@ export type SpecialPlugin = {
   url: string;
   description: string;
   needsFix: boolean;
+  install: { source: "npm" | "routing-suite"; pkg?: string };
   fixNote: string;
 };
 

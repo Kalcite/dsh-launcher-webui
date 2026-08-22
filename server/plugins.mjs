@@ -26,7 +26,17 @@ export const SPECIAL_PLUGINS = [
     url: "https://github.com/yjh051108/dsh-routing-suite",
     description: "运行时注入器（dev_* 工具全家桶）+ 思维模式路由预设（Router Standard / Router Spec）",
     needsFix: true,
+    install: { source: "routing-suite" },
     fixNote: "由两个子模块组成（dsh-super-injector + dsh-router-standard）。安装后可能需要二次修复：注入器 lib 预构建、preset.yml 描述引号修复；完成后重启 dsh 生效，可发 /dev_plugin_status 验证注入器 active。"
+  },
+  {
+    key: "better-sidebar",
+    name: "dsh-better-sidebar",
+    url: "https://github.com/omdsh-dev/DSH-better-sidebar",
+    description: "VSCode 风格侧边栏工作台（npm 发布，独立脚本安装，无需额外修补）",
+    needsFix: false,
+    install: { source: "npm", pkg: "dsh-better-sidebar@latest" },
+    fixNote: ""
   }
 ];
 
@@ -201,27 +211,51 @@ export function overview(ctx) {
   };
 }
 
-/** 搜索插件：npm @deepseek-ai 系列 + 特殊插件 */
+/**
+ * 搜索插件：拉取 @deepseek-ai 候选池后本地过滤。
+ * - 精确：关键词 === 包名（含/不含 @deepseek-ai/ 前缀均可）→ 排最前
+ * - 模糊：名称或描述包含关键词 → 全部返回（名称命中优先于描述命中）
+ * - 空关键词：返回全部候选（按 relevance）
+ */
 export async function search(ctx, q = "") {
-  const kw = (q || "dsh").trim();
-  let npm = [];
+  const kw = (q || "").trim();
+  let pool = [];
   try {
-    const url = `https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(`@deepseek-ai ${kw}`)}&size=25`;
-    const res = await fetch(url, { headers: { "User-Agent": "dsh-launcher" }, signal: AbortSignal.timeout(12000) });
+    const url = `https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent("scope:deepseek-ai")}&size=250`;
+    const res = await fetch(url, { headers: { "User-Agent": "dsh-launcher" }, signal: AbortSignal.timeout(15000) });
     if (res.ok) {
       const data = await res.json();
-      npm = (data.objects ?? [])
+      pool = (data.objects ?? [])
         .map((o) => ({
           name: o.package.name,
           version: o.package.version,
           description: (o.package.description ?? "").slice(0, 200)
         }))
-        .filter((p) => p.name.startsWith("@deepseek-ai/") || kw === "dsh" || p.name.includes(kw));
+        .filter((p) => p.name.startsWith("@deepseek-ai/")); // 候选池仅限 @deepseek-ai scope
     }
   } catch (e) {
     return { npm: [], special: SPECIAL_PLUGINS, error: String(e?.message ?? e) };
   }
-  return { npm, special: SPECIAL_PLUGINS, error: null };
+
+  const lower = kw.toLowerCase();
+  const fullName = `@deepseek-ai/${lower.replace(/^@deepseek-ai\//, "")}`;
+  let results;
+  if (!kw) {
+    results = pool; // 空关键词：全部候选（registry 相关性排序）
+  } else {
+    const exact = pool.filter(
+      (p) => p.name.toLowerCase() === fullName || p.name.toLowerCase() === lower
+    );
+    const nameHit = pool.filter(
+      (p) => !exact.includes(p) && p.name.toLowerCase().includes(lower)
+    );
+    const descHit = pool.filter(
+      (p) => !exact.includes(p) && !nameHit.includes(p) && (p.description ?? "").toLowerCase().includes(lower)
+    );
+    // 精确 → 名称包含 → 描述包含
+    results = [...exact, ...nameHit, ...descHit];
+  }
+  return { npm: results, special: SPECIAL_PLUGINS, error: null };
 }
 
 /** 安装 npm 插件：dsh plugin add <pkg>（先写构建许可，失败自动重试一次） */

@@ -63,12 +63,13 @@ VSCode 轻度开发：`code J:\dsh-launcher`，然后 `pnpm dev`（Vite HMR 5178
 - **已安装插件**：列出 profile 已装 bundle 与本体自带插件（`dsh.profile.bundles` + `cordis.patch.yml` 禁用标记）
   - **本体自带**（dsh 仓库 workspace 提供，如 `@deepseek-ai/dsh-base`）标记"本体自带 · 不可修改"，禁用/卸载被后端拒绝
   - 用户安装插件支持**禁用 / 启用 / 卸载**（禁用 = 编辑 `cordis.patch.yml`，重启生效；卸载 = `dsh plugin remove`）
-- **搜索安装**：关键词搜索 npm `@deepseek-ai/` 系列插件（npm registry search），一键 `dsh plugin add` 安装
-  - 自动处理 pnpm 构建脚本拦截：写入 profile `pnpm-workspace.yaml` 的 `allowBuilds`（node-pty/esbuild）并失败重试
-- **特殊插件**：dsh-routing-suite（[GitHub](https://github.com/yjh051108/dsh-routing-suite)）
-  - 组成：`dsh-super-injector`（运行时注入器，dev_* 工具）+ `dsh-router-standard`（思维模式路由预设 Router Standard/Spec）
-  - 安装流程自动完成**二次修复**：Release 预构建注入器下载（免构建）→ 装配进 profile bundles → 克隆套件（含子模块）→ 预设平铺复制到 `.agent-presets\`（DSH 只扫一级目录）→ `preset.yml` 描述引号修复
-  - 完成后重启 dsh，新会话可选 Router Standard / Router Spec
+- **搜索安装**：npm `@deepseek-ai/` 系列插件（候选池 + 本地过滤）
+  - **精确搜索**：输入完整包名（如 `dsh-bash-sandbox`）→ 完全匹配 `@deepseek-ai/dsh-bash-sandbox`
+  - **模糊搜索**：输入关键词（如 `sandbox`）→ 名称/描述包含的全部返回（`dsh-bash-sandbox`、`dsh-pwsh-sandbox`、`dsh-sandbox-local`…），精确命中排最前
+  - 一键 `dsh plugin add` 安装；自动处理 pnpm 构建脚本拦截（写入 profile `pnpm-workspace.yaml` 的 `allowBuilds`（node-pty/esbuild）并失败重试）
+- **特殊插件**：
+  - **dsh-routing-suite**（[GitHub](https://github.com/yjh051108/dsh-routing-suite)）：注入器 + 路由预设，安装自动完成二次修复（Release 预构建注入器 → 装配 bundles → 子模块克隆 → 预设平铺 → preset.yml 引号修复）
+  - **dsh-better-sidebar**（[GitHub](https://github.com/omdsh-dev/DSH-better-sidebar)）：VSCode 风格侧边栏工作台，npm 发布、独立脚本安装、**无需修补**
 
 ## 更新 dsh（「更新 dsh」页）
 
@@ -198,6 +199,12 @@ tools\plugin.cmd enable <bundle>
 | 更新后插件不生效 | 插件在 `~\.dsh\profiles\web`（用户层），与仓库版本独立；`tools\plugin.cmd` 管理 |
 
 ## 更新日志
+
+### v0.4.1 — 搜索改进与特殊插件扩展
+
+- **搜索重写**：候选池（@deepseek-ai scope）+ 本地过滤，支持**精确搜索**（完整包名完全匹配，如 `dsh-bash-sandbox`）与**模糊搜索**（名称/描述包含，如 `sandbox` 返回全部 sandbox 系列），精确命中排最前
+- **新增特殊插件 dsh-better-sidebar**（[GitHub](https://github.com/omdsh-dev/DSH-better-sidebar)）：VSCode 风格侧边栏工作台，npm 独立安装、无需修补
+- 特殊插件卡片按各自安装方式调用（routing-suite 走特殊修复流程，better-sidebar 走 npm）
 
 ### v0.4.0 — 插件管理
 

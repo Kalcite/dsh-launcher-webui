@@ -112,11 +112,11 @@ export function PluginCard({ busy, setBusy, deployResult }: Props) {
     setBusy(false);
   };
 
-  const installSpecial = async () => {
+  const installSpecial = async (spec: { source: "npm" | "routing-suite"; pkg?: string }) => {
     setBusy(true);
     setError(null);
     try {
-      const r = await api.pluginInstall({ source: "routing-suite" });
+      const r = await api.pluginInstall(spec);
       if (!r.ok) setError(r.error || "安装启动失败");
     } catch (e) {
       setError(String(e));
@@ -166,7 +166,7 @@ export function PluginCard({ busy, setBusy, deployResult }: Props) {
       )}
       {expanded === sp.key && <p className="hint">{sp.fixNote}</p>}
       <div className="btn-row" style={{ marginTop: 10 }}>
-        <button className="btn btn-primary btn-sm" disabled={busy} onClick={installSpecial}>
+        <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => installSpecial(sp.install)}>
           <Download size={13} /> 安装 {sp.name}
         </button>
       </div>
@@ -216,7 +216,7 @@ export function PluginCard({ busy, setBusy, deployResult }: Props) {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && doSearch()}
-            placeholder="关键词，如 typing / agent / web / 留空列出全部"
+            placeholder="精确：dsh-bash-sandbox（完全匹配）｜模糊：sandbox（名称/描述包含）｜留空列出全部"
             spellCheck={false}
             className="grow-input"
           />
