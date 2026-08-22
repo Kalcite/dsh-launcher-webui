@@ -20,7 +20,8 @@ import {
   statSync,
   readFileSync,
   readdirSync,
-  writeFileSync
+  writeFileSync,
+  mkdirSync
 } from "node:fs";
 import { mkdir, readdir, rename, rmdir } from "node:fs/promises";
 import path from "node:path";
@@ -110,7 +111,10 @@ const pluginCtx = {
   LAUNCHER_ROOT,
   pushLog,
   runStream,
-  kitNodeExe
+  kitNodeExe,
+  recordLastOp,
+  lastOp: () => state.lastOp,
+  backupSessions: (reason) => backupSessions(reason)
 };
 
 /* ------------------------------ 状态 ------------------------------ */
@@ -119,8 +123,12 @@ const state = {
   proc: null,       // 由本启动器拉起的 dsh 子进程
   startedAt: null,
   busy: false,      // 有启停操作在执行
+  stopping: false,  // 正在人工停止（避免误判致命错误）
   log: [],          // 环形日志 [{ seq, line }]
   seq: 0,
+  events: [],       // 事件记录 [{ seq, ts, level, source, message }]
+  eventSeq: 0,
+  lastOp: null,     // 最近一次可恢复操作快照（更新前/插件安装前）
   envCache: null,
   envCacheAt: 0
 };
@@ -128,11 +136,105 @@ const sseClients = new Set();
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function pushLog(line) {
-  const entry = { seq: state.seq++, line };
+/**
+ * 记录一行日志 + 一条结构化事件。
+ * @param {string} line 日志内容
+ * @param {"info"|"warn"|"error"} level 级别：正常（启动/停止/重启等）不特意标注；
+ *        警告用黄色、错误用红色标记
+ * @param {string} source 来源：launcher / server / deploy / update / plugin
+ */
+function pushLog(line, level = "info", source = "launcher") {
+  const entry = { seq: state.seq++, line, level, source };
   state.log.push(entry);
   if (state.log.length > cfg.logLines) state.log.splice(0, state.log.length - cfg.logLines);
+  const ev = { seq: state.eventSeq++, ts: Date.now(), level, source, message: line };
+  state.events.push(ev);
+  if (state.events.length > 2000) state.events.splice(0, state.events.length - 2000);
   broadcast({ type: "log", entry });
+  broadcast({ type: "event", event: ev });
+}
+
+/** 记录可恢复操作的快照（更新前版本 / 插件安装前配置），供「尝试恢复」使用；持久化到 .dshctl/backups/lastop.json */
+function recordLastOp(kind, data) {
+  state.lastOp = { kind, ts: Date.now(), data };
+  try {
+    const backupsDir = path.join(cfg.dshRoot, ".dshctl", "backups");
+    mkdirSync(backupsDir, { recursive: true });
+    writeFileSync(path.join(backupsDir, "lastop.json"), JSON.stringify(state.lastOp, null, 2), "utf8");
+  } catch { /* 持久化失败不影响内存快照 */ }
+  pushLog(`[launcher] 已记录可恢复快照（${kind}）`, "info", "launcher");
+}
+
+/** 启动时加载持久化的恢复快照（后端重启后仍可恢复） */
+function loadLastOp() {
+  try {
+    const f = path.join(cfg.dshRoot, ".dshctl", "backups", "lastop.json");
+    if (existsSync(f)) state.lastOp = JSON.parse(readFileSync(f, "utf8"));
+  } catch { /* 无快照 */ }
+}
+
+/* ------------------------------ 会话备份（升级 dsh/插件前保护） ------------------------------ */
+
+const backupsFile = () => path.join(cfg.dshRoot, ".dshctl", "backups", "backups.json");
+
+function readBackups() {
+  try { return JSON.parse(readFileSync(backupsFile(), "utf8")); } catch { return []; }
+}
+
+function writeBackups(list) {
+  try {
+    mkdirSync(path.dirname(backupsFile()), { recursive: true });
+    writeFileSync(backupsFile(), JSON.stringify(list, null, 2), "utf8");
+  } catch { /* 记录失败不阻断 */ }
+}
+
+/** 备份 dsh 会话数据（$DSH_HOME/sessions）到 .dshctl/backups/sessions-<ts>/，并写记录 */
+function backupSessions(reason = "手动备份") {
+  const home = cfg.dshHome ?? path.join(homedir(), ".dsh");
+  const src = path.join(home, "sessions");
+  const id = `sessions-${Date.now()}`;
+  const target = path.join(cfg.dshRoot, ".dshctl", "backups", id);
+  try {
+    if (!existsSync(src)) {
+      pushLog(`[backup] ⚠ 未找到会话目录 ${src}，跳过备份（仍记录）`, "warn", "launcher");
+      writeBackups([...readBackups(), { id, ts: Date.now(), reason, source: src, target, size: 0, files: 0, skipped: true }]);
+      return { ok: true, id, skipped: true };
+    }
+    cpSync(src, target, { recursive: true });
+    let size = 0, files = 0;
+    for (const f of readdirSync(target, { recursive: true })) {
+      const full = path.join(target, f);
+      if (statSyncSafe(full)?.isFile()) { size += statSync(full).size; files++; }
+    }
+    writeBackups([...readBackups(), { id, ts: Date.now(), reason, source: src, target, size, files }]);
+    pushLog(`[backup] 已备份会话 → ${target}（${files} 文件 / ${(size / 1024).toFixed(1)} KB，原因：${reason}）`);
+    return { ok: true, id, files, size };
+  } catch (e) {
+    pushLog(`[backup] 备份失败: ${e?.message ?? e}`, "error", "launcher");
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+}
+
+/** 删除备份记录与目录 */
+function deleteBackup(id) {
+  const list = readBackups();
+  const item = list.find((b) => b.id === id);
+  if (!item) return { ok: false, error: "备份记录不存在" };
+  try {
+    if (!item.skipped && existsSync(item.target)) rmSync(item.target, { recursive: true, force: true });
+  } catch (e) {
+    return { ok: false, error: `删除目录失败: ${e?.message ?? e}` };
+  }
+  writeBackups(list.filter((b) => b.id !== id));
+  pushLog(`[backup] 已删除备份 ${id}（原因：${item.reason}）`);
+  return { ok: true };
+}
+
+/** 广播致命错误（前端弹窗：查看日志 / 尝试恢复） */
+function broadcastFatal(kind, message) {
+  const payload = { type: "fatal", kind, message, recoverable: kind === "update" || kind === "plugin" };
+  broadcast(payload);
+  pushLog(`[fatal] ${message}`, "error", kind === "update" ? "update" : kind === "plugin" ? "plugin" : "server");
 }
 
 function broadcast(msg) {
@@ -210,7 +312,8 @@ function runStream(cmd, args, opts = {}) {
     const proc = spawn(cmd, args, {
       cwd: opts.cwd ?? LAUNCHER_ROOT,
       windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      env: opts.env
     });
     const tee = (chunk, prefix) => {
       for (const line of chunk.toString("utf8").split(/\r?\n/)) {
@@ -324,6 +427,88 @@ async function deployDsh(opts = {}) {
 }
 
 /** 检查更新：本地版本信息 + 同步 GitHub releases（含更新内容） */
+/** 简单版本比较：纯数字点分（0.4.3 vs 0.4.10） */
+function compareVersions(a, b) {
+  const pa = String(a).replace(/^v/, "").split(".").map(Number);
+  const pb = String(b).replace(/^v/, "").split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? 0, y = pb[i] ?? 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+/** 检查启动器自身更新（对比本仓库 GitHub Releases 最新版） */
+async function launcherCheck() {
+  let current = "?";
+  try {
+    current = JSON.parse(readFileSync(path.join(LAUNCHER_ROOT, "package.json"), "utf8")).version;
+  } catch { /* 保持 ? */ }
+  let latest = null, error = null;
+  try {
+    const res = await fetch("https://api.github.com/repos/Kalcite/dsh-launcher-webui/releases/latest", {
+      headers: { "User-Agent": "dsh-launcher" }, signal: AbortSignal.timeout(12000)
+    });
+    if (res.ok) {
+      const r = await res.json();
+      latest = { tag: r.tag_name, name: r.name, publishedAt: r.published_at, body: (r.body ?? "").slice(0, 3000) };
+    } else {
+      throw new Error(`HTTP ${res.status}`);
+    }
+  } catch (e) {
+    error = String(e?.message ?? e);
+  }
+  const hasUpdate = latest ? compareVersions(current, latest.tag.replace(/^v/, "")) < 0 : false;
+  return { current, latest, hasUpdate, error, repo: "Kalcite/dsh-launcher-webui" };
+}
+
+/**
+ * 启动器更新（分步，不中断当前进程）：
+ * 1) git pull 拉最新源码（已加载模块不受文件替换影响，当前进程安全）
+ * 2) pnpm install（新依赖）
+ * 3) pnpm build 重建 dist（serveStatic 逐请求读盘 → 前端立即生效）
+ * 4) 写 .update-pending 标记 → 提示重启；重启时 launcher.cmd 完成剩余更新
+ */
+async function launcherUpdate() {
+  if (state.busy) return { ok: false, error: "已有操作在执行，请稍候" };
+  pushLog("[launcher] ══ 启动器更新（分步：不中断当前进程）══");
+  state.busy = true;
+  try {
+    const pnpm = kitPnpmCmd();
+    // CI=true 跳过 pnpm 的 deps 状态检查（避免 version/lockfile 短暂不一致时卡住）
+    const pnpmEnv = { ...process.env, CI: "true" };
+    // 1) git pull
+    pushLog("[launcher] 步骤 1/4: git pull --ff-only…");
+    let r = await runStream("git", ["-C", LAUNCHER_ROOT, "pull", "--ff-only"], { cwd: LAUNCHER_ROOT, env: pnpmEnv });
+    if (r.code !== 0) return { ok: false, error: "git pull 失败（工作区可能有未提交改动，请先提交或还原）" };
+    // 2) pnpm install
+    pushLog("[launcher] 步骤 2/4: pnpm install…");
+    r = pnpm
+      ? await runStream("cmd", ["/c", pnpm, "install"], { cwd: LAUNCHER_ROOT, env: pnpmEnv })
+      : await runStream("cmd", ["/c", "pnpm install"], { cwd: LAUNCHER_ROOT, env: pnpmEnv });
+    if (r.code !== 0) return { ok: false, error: `pnpm install 失败 (exit ${r.code})` };
+    // 3) pnpm build
+    pushLog("[launcher] 步骤 3/4: pnpm run build（重建前端，即时生效）…");
+    r = pnpm
+      ? await runStream("cmd", ["/c", pnpm, "run", "build"], { cwd: LAUNCHER_ROOT, env: pnpmEnv })
+      : await runStream("cmd", ["/c", "pnpm run build"], { cwd: LAUNCHER_ROOT, env: pnpmEnv });
+    if (r.code !== 0) return { ok: false, error: `pnpm run build 失败 (exit ${r.code})` };
+    // 4) 重启标记
+    pushLog("[launcher] 步骤 4/4: 写入重启标记 .update-pending…");
+    try {
+      writeFileSync(path.join(LAUNCHER_ROOT, ".update-pending"),
+        JSON.stringify({ ts: Date.now(), phase: 1, message: "基本更新完成，重启后完成剩余更新" }), "utf8");
+    } catch (e) {
+      return { ok: false, error: `写入重启标记失败: ${e?.message ?? e}` };
+    }
+    pushLog("[launcher] ══ 基本更新完成 ══（当前进程未受影响；前端更新已即时生效）");
+    pushLog("[launcher] 请重启启动器完成剩余更新（launcher.cmd 启动时会自动收尾并清除标记）");
+    return { ok: true, phase: 1, message: "基本更新完成，重启启动器后完成剩余更新" };
+  } finally {
+    state.busy = false;
+  }
+}
+
 async function updateCheck() {
   const root = cfg.dshRoot;
   const out = {
@@ -473,6 +658,18 @@ async function updateDsh(opts = {}) {
     await stopServer();
   }
 
+  // 记录恢复快照：更新前的版本/提交（供「尝试恢复到修改前」）
+  const [prevTagR, prevCommitR] = await Promise.all([
+    run("git", ["-C", root, "describe", "--tags", "--abbrev=0"]),
+    run("git", ["-C", root, "rev-parse", "HEAD"])
+  ]);
+  recordLastOp("update", {
+    prevTag: prevTagR.ok ? prevTagR.out : null,
+    prevCommit: prevCommitR.ok ? prevCommitR.out : null
+  });
+  // 升级前自动备份会话数据（保护会话）
+  backupSessions(`dsh 升级前自动备份（${version ?? "最新"}）`);
+
   state.busy = true;
   try {
     // 1) git：指定版本 → fetch tag + checkout；未指定 → 最新 master
@@ -510,7 +707,64 @@ async function updateDsh(opts = {}) {
 
     state.envCache = null;
     pushLog("[update] ══ 更新完成 ══（运行 dsh 请点击「启动」；浏览器若显示旧页面请硬刷新 Ctrl+Shift+R）");
-    return { ok: true, version: version ?? "latest", health: health ?? { total: 0, missing: [] }, status: await deployStatus(root) };
+    // 升级后跑一遍常用流程确认插件兼容性：自动启动 dsh → HTTP 探活 → 停止
+    // （先释放 busy，避免 startServer 被"已有操作在执行"拒绝）
+    state.busy = false;
+    pushLog("[update] 升级后兼容性验证：自动启动 dsh 并探活…");
+    let compat = { ok: false, httpOk: false };
+    try {
+      const start = await startServer();
+      if (start.ok) {
+        // dsh 冷启动约 25-35s，探活窗口放宽到 60s
+        const deadline = Date.now() + 60000;
+        while (Date.now() < deadline) {
+          await sleep(2000);
+          const st = await serverStatus();
+          if (st.httpOk) { compat.httpOk = true; break; }
+        }
+        await stopServer();
+      }
+    } catch { /* 验证失败不阻断 */ }
+    compat.ok = compat.httpOk;
+    if (compat.ok) pushLog("[update] 兼容性验证通过（dsh 正常启动响应）");
+    else pushLog("[update] ⚠ 兼容性验证未通过（dsh 未能正常响应，可查看日志/事件管理器或尝试恢复）", "warn", "update");
+    return { ok: true, version: version ?? "latest", health: health ?? { total: 0, missing: [] }, compat, status: await deployStatus(root) };
+  } finally {
+    state.busy = false;
+  }
+}
+
+/** 恢复更新造成的错误：回退到更新前版本 + 全量重建 + 校验 */
+async function recoverUpdate() {
+  const op = state.lastOp;
+  if (!op || op.kind !== "update") return { ok: false, error: "没有可恢复的更新快照" };
+  const root = cfg.dshRoot;
+  const target = op.data.prevTag || op.data.prevCommit;
+  if (!target) return { ok: false, error: "缺少更新前版本记录" };
+  const busyPids = await portPids(cfg.webPort);
+  if (busyPids.length > 0 && !state.proc) {
+    return { ok: false, error: `端口 ${cfg.webPort} 正被其他进程占用（PID ${busyPids.join(",")}），请先停止 dsh 服务器再恢复` };
+  }
+  if (state.proc) {
+    pushLog("[recover] 检测到运行中的 dsh 服务器，自动停止…");
+    await stopServer();
+  }
+  state.busy = true;
+  try {
+    pushLog(`[recover] ══ 恢复到更新前版本：${target} ══`);
+    let r = await runStream("git", ["-C", root, "checkout", "-B", "master", target, "-f"], { cwd: root });
+    if (r.code !== 0) {
+      // 浅克隆可能缺旧提交 → 先 fetch 再回退
+      await runStream("git", ["-C", root, "fetch", "origin", "--unshallow"], { cwd: root }).catch(() => {});
+      r = await runStream("git", ["-C", root, "checkout", "-B", "master", target, "-f"], { cwd: root });
+    }
+    if (r.code !== 0) return { ok: false, error: "git 回退失败，请检查版本记录" };
+    const { code, error, health } = await installBuildVerify(root, { clean: true, skipBuild: false });
+    if (code !== 0) return { ok: false, error };
+    state.envCache = null;
+    const status = await deployStatus(root);
+    pushLog(`[recover] ══ 恢复完成：版本 ${status.pkgVersion ?? target}，客户端 bundle ${health?.total ?? 0} 个 ${health?.missing?.length ? `缺失 ${health.missing.length}` : "完整"} ══`, health?.missing?.length ? "warn" : "info");
+    return { ok: true, status, health: health ?? { total: 0, missing: [] } };
   } finally {
     state.busy = false;
   }
@@ -594,6 +848,7 @@ async function envInfo() {
     dshRoot: cfg.dshRoot,
     dshHome: cfg.dshHome, // null = 默认 ~/.dsh
     webPort: cfg.webPort,
+    launcherPort: cfg.launcherPort,
     profile: cfg.profile
   };
   state.envCacheAt = now;
@@ -683,13 +938,19 @@ async function startServer() {
   proc.stderr.on("data", (d) => tee(d, "[stderr]"));
 
   proc.on("error", (err) => {
-    pushLog(`[launcher] 子进程启动失败: ${err.message}`);
+    pushLog(`[launcher] 子进程启动失败: ${err.message}`, "error", "server");
   });
   proc.on("exit", (code, signal) => {
-    pushLog(`[launcher] dsh 服务器已退出 (code=${code}${signal ? ` signal=${signal}` : ""})`);
+    // 非正常退出（code≠0 且非人工 stop）→ 致命错误事件 + 弹窗（可尝试恢复）
+    const byStop = state.stopping === true;
+    const abnormal = !byStop && code !== 0 && code !== null;
+    pushLog(`[launcher] dsh 服务器已退出 (code=${code}${signal ? ` signal=${signal}` : ""})`, abnormal ? "error" : "info", "server");
     if (stream) stream.end();
     state.proc = null;
     state.startedAt = null;
+    if (abnormal) {
+      broadcastFatal("server", `dsh 服务器异常退出 (code=${code}${signal ? ` signal=${signal}` : ""})，请查看日志或尝试恢复`);
+    }
     broadcast({ type: "refresh" });
   });
 
@@ -700,6 +961,7 @@ async function startServer() {
 async function stopServer() {
   if (state.busy) return { ok: false, error: "已有操作在执行，请稍候" };
   state.busy = true;
+  state.stopping = true; // 人工停止：exit handler 不判为致命错误
   try {
     if (state.proc) {
       pushLog(`[launcher] 停止 dsh 服务器 (taskkill PID ${state.proc.pid} /T /F)`);
@@ -715,9 +977,10 @@ async function stopServer() {
       await sleep(300);
     }
     const free = (await portPids(cfg.webPort)).length === 0;
-    pushLog(free ? "[launcher] 服务器已停止，端口已释放" : `[launcher] 警告：端口 ${cfg.webPort} 仍在占用`);
+    pushLog(free ? "[launcher] 服务器已停止，端口已释放" : `[launcher] 警告：端口 ${cfg.webPort} 仍在占用`, free ? "info" : "warn");
     return { ok: free, error: free ? undefined : `端口 ${cfg.webPort} 未能释放` };
   } finally {
+    state.stopping = false;
     state.busy = false;
   }
 }
@@ -828,8 +1091,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && p === "/api/deploy/update") {
       const body = await readBody(req);
       updateDsh(body ?? {})
-        .then((r) => broadcast({ type: "deploy", action: "update", ...r }))
-        .catch((e) => broadcast({ type: "deploy", action: "update", ok: false, error: String(e?.message ?? e) }));
+        .then((r) => {
+          broadcast({ type: "deploy", action: "update", ...r });
+          if (!r.ok) broadcastFatal("update", r.error ?? "更新失败");
+        })
+        .catch((e) => { broadcast({ type: "deploy", action: "update", ok: false, error: String(e?.message ?? e) }); broadcastFatal("update", String(e?.message ?? e)); });
       return sendJson(res, { ok: true, started: true });
     }
 
@@ -838,14 +1104,20 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && p === "/api/update/apply") {
       const body = await readBody(req);
       updateDsh(body ?? {})
-        .then((r) => broadcast({ type: "deploy", action: "update", ...r }))
-        .catch((e) => broadcast({ type: "deploy", action: "update", ok: false, error: String(e?.message ?? e) }));
+        .then((r) => {
+          broadcast({ type: "deploy", action: "update", ...r });
+          if (!r.ok) broadcastFatal("update", r.error ?? "更新失败");
+        })
+        .catch((e) => { broadcast({ type: "deploy", action: "update", ok: false, error: String(e?.message ?? e) }); broadcastFatal("update", String(e?.message ?? e)); });
       return sendJson(res, { ok: true, started: true });
     }
     if (req.method === "POST" && p === "/api/update/repair") {
       repairDsh()
-        .then((r) => broadcast({ type: "deploy", action: "update", ...r }))
-        .catch((e) => broadcast({ type: "deploy", action: "update", ok: false, error: String(e?.message ?? e) }));
+        .then((r) => {
+          broadcast({ type: "deploy", action: "update", ...r });
+          if (!r.ok) broadcastFatal("update", r.error ?? "构建修复失败");
+        })
+        .catch((e) => { broadcast({ type: "deploy", action: "update", ok: false, error: String(e?.message ?? e) }); broadcastFatal("update", String(e?.message ?? e)); });
       return sendJson(res, { ok: true, started: true });
     }
     if (req.method === "POST" && p === "/api/config") {
@@ -885,7 +1157,12 @@ const server = http.createServer(async (req, res) => {
       const map = {
         web: () => openUrl(`http://127.0.0.1:${cfg.webPort}`),
         folder: () => execFile("cmd", ["/c", "start", "", cfg.dshRoot], { windowsHide: true, detached: true }, () => {}),
-        vscode: () => execFile("cmd", ["/c", "start", "", "code", cfg.dshRoot], { windowsHide: true, detached: true }, () => {})
+        vscode: () => execFile("cmd", ["/c", "start", "", "code", cfg.dshRoot], { windowsHide: true, detached: true }, () => {}),
+        // 打开服务端日志目录（dshRoot/.dshctl，含 server.console.log）
+        logs: () => {
+          const logsDir = path.join(cfg.dshRoot, ".dshctl");
+          execFile("cmd", ["/c", "start", "", logsDir], { windowsHide: true, detached: true }, () => {});
+        }
       };
       const fn = map[target];
       if (!fn) return sendJson(res, { ok: false, error: `未知 target: ${target}` }, 400);
@@ -919,18 +1196,25 @@ const server = http.createServer(async (req, res) => {
       const q = url.searchParams.get("q") ?? "";
       return sendJson(res, await plugins.search(pluginCtx, q));
     }
-    const runPluginTask = (task, okExtra = {}) => {
+    const runPluginTask = (task, okExtra = {}, fatalKind = null) => {
       task
-        .then((r) => broadcast({ type: "deploy", action: "plugin", ...r, ...okExtra }))
-        .catch((e) => broadcast({ type: "deploy", action: "plugin", ok: false, error: String(e?.message ?? e) }));
+        .then((r) => {
+          broadcast({ type: "deploy", action: "plugin", ...r, ...okExtra });
+          if (fatalKind && !r.ok) broadcastFatal(fatalKind, r.error ?? "操作失败");
+        })
+        .catch((e) => {
+          const msg = String(e?.message ?? e);
+          broadcast({ type: "deploy", action: "plugin", ok: false, error: msg });
+          if (fatalKind) broadcastFatal(fatalKind, msg);
+        });
     };
     if (req.method === "POST" && p === "/api/plugins/install") {
       const body = await readBody(req);
       const source = body?.source ?? "npm";
       if (source === "routing-suite") {
-        runPluginTask(plugins.installRoutingSuite(pluginCtx));
+        runPluginTask(plugins.installRoutingSuite(pluginCtx), {}, "plugin");
       } else if (body?.pkg) {
-        runPluginTask(plugins.installNpm(pluginCtx, String(body.pkg)));
+        runPluginTask(plugins.installNpm(pluginCtx, String(body.pkg)), {}, "plugin");
       } else {
         return sendJson(res, { ok: false, error: "缺少 pkg 参数" }, 400);
       }
@@ -948,6 +1232,56 @@ const server = http.createServer(async (req, res) => {
       runPluginTask(plugins.removeNpm(pluginCtx, String(body.pkg)));
       return sendJson(res, { ok: true, started: true });
     }
+    if (req.method === "POST" && p === "/api/plugins/update") {
+      const body = await readBody(req);
+      if (!body?.pkg) return sendJson(res, { ok: false, error: "缺少 pkg 参数" }, 400);
+      runPluginTask(plugins.updatePlugin(pluginCtx, String(body.pkg)), {}, null);
+      return sendJson(res, { ok: true, started: true });
+    }
+
+    // ── 会话备份 ──
+    if (req.method === "GET" && p === "/api/backup/list") {
+      return sendJson(res, { backups: readBackups() });
+    }
+    if (req.method === "POST" && p === "/api/backup") {
+      const body = await readBody(req);
+      return sendJson(res, backupSessions(body?.reason ? String(body.reason) : "手动备份"));
+    }
+    if (req.method === "POST" && p === "/api/backup/delete") {
+      const body = await readBody(req);
+      if (!body?.id) return sendJson(res, { ok: false, error: "缺少 id" }, 400);
+      return sendJson(res, deleteBackup(String(body.id)));
+    }
+
+    // ── 启动器设置 / 自身更新 ──
+    if (req.method === "GET" && p === "/api/launcher/check") {
+      return sendJson(res, await launcherCheck());
+    }
+    if (req.method === "POST" && p === "/api/launcher/update") {
+      launcherUpdate()
+        .then((r) => broadcast({ type: "deploy", action: "launcher-update", ...r }))
+        .catch((e) => broadcast({ type: "deploy", action: "launcher-update", ok: false, error: String(e?.message ?? e) }));
+      return sendJson(res, { ok: true, started: true });
+    }
+
+    // ── 事件管理器 / 恢复 ──
+    if (req.method === "GET" && p === "/api/events/list") {
+      const since = Number(url.searchParams.get("since") ?? 0);
+      return sendJson(res, {
+        events: state.events.filter((e) => e.seq > since),
+        nextSeq: state.eventSeq,
+        lastOp: state.lastOp
+      });
+    }
+    if (req.method === "POST" && p === "/api/recover") {
+      const body = await readBody(req);
+      const kind = body?.kind;
+      const task = kind === "update" ? recoverUpdate() : kind === "plugin" ? plugins.recoverPlugin(pluginCtx) : Promise.resolve({ ok: false, error: "未知恢复类型" });
+      task
+        .then((r) => broadcast({ type: "deploy", action: "recover", kind, ...r }))
+        .catch((e) => broadcast({ type: "deploy", action: "recover", kind, ok: false, error: String(e?.message ?? e) }));
+      return sendJson(res, { ok: true, started: true });
+    }
 
     return serveStatic(req, res, url);
   } catch (err) {
@@ -963,6 +1297,9 @@ server.on("error", (err) => {
   }
   process.exit(1);
 });
+
+// 启动时恢复上次可恢复快照（后端重启后仍能「尝试恢复」）
+loadLastOp();
 
 server.listen(cfg.launcherPort, "127.0.0.1", () => {
   console.log(`[dsh-launcher] 启动器 UI: http://127.0.0.1:${cfg.launcherPort}`);

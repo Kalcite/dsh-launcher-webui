@@ -112,6 +112,16 @@ export function UpdateCard({ busy, setBusy, deployResult }: Props) {
         </button>
       </div>
 
+      {/* 预览版破坏性更新警告 */}
+      <div className="error-banner" style={{ marginBottom: 14 }}>
+        <span>
+          <AlertTriangle size={13} /> ⚠ dsh 处于<strong>开发者预览版（Developer Preview）</strong>阶段，版本间可能存在<strong>破坏性更新</strong>，
+          贸然升级可能造成致命影响（配置/会话/插件不兼容）。
+          升级前将<strong>自动备份会话数据</strong>（~/.dsh/sessions）；升级后自动<strong>启动验证插件兼容性</strong>。
+          如需回退，可在弹窗或事件管理器中使用「尝试恢复」。
+        </span>
+      </div>
+
       {/* 当前版本 */}
       <div className="deploy-status">
         <div className="drow">

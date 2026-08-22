@@ -45,6 +45,19 @@ if not exist "dist\index.html" (
     exit /b 1
 )
 
+rem --- finish pending launcher update (basic update done; finish here on restart) ---
+if exist ".update-pending" (
+    echo [dsh-launcher] Pending update detected - finishing remaining steps...
+    set "LOCAL_NODE=%~dp0.runtime\node\node.exe"
+    if exist "%LOCAL_NODE%" (
+        echo [dsh-launcher] Syncing dependencies (pnpm install)...
+        set "CI=true"
+        call "%~dp0.runtime\node\pnpm.cmd" install
+    )
+    del ".update-pending"
+    echo [dsh-launcher] Update finished - version now up to date.
+)
+
 rem --- prefer the kit's own portable node, fallback to dsh's ---
 set "LOCAL_NODE=%~dp0.runtime\node\node.exe"
 if not exist "%LOCAL_NODE%" set "LOCAL_NODE=%~dp0..\deepseek_harness\.runtime\node\node.exe"

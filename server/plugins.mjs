@@ -13,7 +13,9 @@ import {
   readdirSync,
   rmSync,
   cpSync,
-  statSync
+  statSync,
+  copyFileSync,
+  mkdirSync
 } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import os from "node:os";
@@ -258,18 +260,99 @@ export async function search(ctx, q = "") {
   return { npm: results, special: SPECIAL_PLUGINS, error: null };
 }
 
+/** 安装前备份：cordis.patch.yml 备份 + 当前 bundles，供「尝试恢复」使用 */
+function backupProfileConfig(ctx) {
+  const backupDir = path.join(ctx.cfg.dshRoot, ".dshctl", "backups");
+  mkdirSync(backupDir, { recursive: true });
+  const patch = path.join(profileDir(ctx), "cordis.patch.yml");
+  const patchBackup = path.join(backupDir, `patch-${Date.now()}.yml`);
+  if (existsSync(patch)) copyFileSync(patch, patchBackup);
+  return { patchBackup, bundles: profileBundles(ctx) };
+}
+
 /** 安装 npm 插件：dsh plugin add <pkg>（先写构建许可，失败自动重试一次） */
 export async function installNpm(ctx, pkg) {
   ctx.pushLog(`[plugin] ══ 安装 npm 插件 ${pkg} ══`);
   ensureBuildAllowance(ctx);
+  if (typeof ctx.backupSessions === "function") ctx.backupSessions(`插件安装前备份：${pkg}`);
+  ctx.recordLastOp("plugin", { pkg, ...backupProfileConfig(ctx) });
   let r = await runDshPlugin(ctx, ["add", pkg]);
   if (r.code !== 0) {
-    ctx.pushLog("[plugin] 安装失败，写入构建许可后重试一次…");
+    ctx.pushLog("[plugin] 安装失败，写入构建许可后重试一次…", "warn", "plugin");
     ensureBuildAllowance(ctx);
     r = await runDshPlugin(ctx, ["add", pkg]);
   }
   if (r.code !== 0) return { ok: false, error: `dsh plugin add ${pkg} 失败 (exit ${r.code})，请查看日志` };
   ctx.pushLog("[plugin] 安装完成（重启 dsh 后生效）");
+  return { ok: true };
+}
+
+/**
+ * 更新插件（分级路径）：
+ * - npx 安装 → 无需手动更新（自动跟随）
+ * - 源码构建（workspace 包）→ 随 dsh 更新（git pull + install + build）
+ * - 用户安装（npm/profile）→ dsh plugin update <pkg>（better-sidebar 按 README 用 add @latest）
+ * - routing-suite → 暂不更新
+ */
+export async function updatePlugin(ctx, pkg) {
+  const base = String(pkg).replace(/@[^@]*$/, "");
+  if (base.includes("dsh-routing-suite") || base.includes("dsh-super-injector")) {
+    return { ok: false, error: "dsh-routing-suite 暂不支持自动更新（按仓库发布流程手动处理）" };
+  }
+  if (isBuiltin(ctx, base)) {
+    return { ok: false, error: `${base} 是本体自带插件，更新随 dsh 本体进行（管理 dsh → 更新 dsh）` };
+  }
+  if (typeof ctx.backupSessions === "function") ctx.backupSessions(`插件更新前备份：${base}`);
+  ctx.pushLog(`[plugin] ══ 更新插件 ${base} ══`);
+  let r;
+  if (base === "dsh-better-sidebar") {
+    // 按仓库 README 方法：npm 发布，add @latest 覆盖更新
+    ctx.pushLog("[plugin] better-sidebar 按仓库 README 方法更新（add @latest）…");
+    ensureBuildAllowance(ctx);
+    r = await runDshPlugin(ctx, ["add", `${base}@latest`]);
+    if (r.code !== 0) {
+      ensureBuildAllowance(ctx);
+      r = await runDshPlugin(ctx, ["add", `${base}@latest`]);
+    }
+  } else {
+    r = await runDshPlugin(ctx, ["update", base]);
+  }
+  if (r.code !== 0) return { ok: false, error: `插件更新失败 (exit ${r.code})，请查看日志` };
+  ctx.pushLog(`[plugin] 更新完成（重启 dsh 后生效）`);
+  return { ok: true };
+}
+
+/** 恢复插件安装造成的错误：清除安装内容 + 还原 cordis.patch.yml */
+export async function recoverPlugin(ctx) {
+  const op = typeof ctx.lastOp === "function" ? ctx.lastOp() : ctx.lastOp;
+  if (!op || op.kind !== "plugin") return { ok: false, error: "没有可恢复的插件操作快照" };
+  const { pkg, patchBackup, bundles } = op.data;
+  ctx.pushLog("[plugin] ══ 恢复插件安装 ══");
+  // 1) 若该插件仍在 bundles 中 → 卸载（pkg 可能带 @latest 等版本后缀，需归一化）
+  const basePkg = pkg ? String(pkg).replace(/@[^@]*$/, "") : null;
+  const installed = (bundles ?? []).some((b) => basePkg && (b === basePkg || b.includes(basePkg)));
+  if (basePkg && installed) {
+    ctx.pushLog(`[plugin] 卸载 ${basePkg}（清除安装内容）…`);
+    const r = await runDshPlugin(ctx, ["remove", basePkg]);
+    if (r.code !== 0) ctx.pushLog(`[plugin] ⚠ 卸载失败 (exit ${r.code})，继续还原配置`, "warn", "plugin");
+  } else {
+    ctx.pushLog("[plugin] 插件不在 bundles 中，跳过卸载");
+  }
+  // 2) 还原 cordis.patch.yml
+  const patch = path.join(profileDir(ctx), "cordis.patch.yml");
+  if (patchBackup && existsSync(patchBackup)) {
+    copyFileSync(patchBackup, patch);
+    ctx.pushLog(`[plugin] 已还原 cordis.patch.yml → ${patch}`);
+  } else {
+    // 无备份 → 清空 disabled 标记（写空列表占位）
+    try {
+      const raw = readFileSync(patch, "utf8");
+      const cleaned = raw.replace(/^\s*-\s*id:.*(?:\r?\n\s+disabled:\s*true.*)?$/gm, "").replace(/\n{3,}/g, "\n\n").trim() || "[]";
+      writeFileSync(patch, cleaned, "utf8");
+      ctx.pushLog("[plugin] 已清理 cordis.patch.yml 的禁用标记", "warn", "plugin");
+    } catch { /* 无补丁文件 */ }
+  }
+  ctx.pushLog("[plugin] ══ 插件恢复完成（重启 dsh 后生效） ══");
   return { ok: true };
 }
 

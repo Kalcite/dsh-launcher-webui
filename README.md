@@ -36,8 +36,10 @@ J:\dsh-launcher\                 ← 套件根（运行时约 172MB，可整体�
 |---|---|
 | **概览** | 服务器启停/重启 + HTTP 探活 + PID/日志大小；环境信息（node/pnpm/git/便携 Node/dshRoot）；数据目录 DSH_HOME 配置（支持**文件夹选择器**）；一键打开 Web UI / 仓库目录 / VSCode；实时日志面板（过滤/跟随/清空视图） |
 | **管理 dsh** | dsh 本体目录部署/切换/检查（一键部署 clone+install+build、**文件夹选择器**、切换 dshRoot） |
-| **插件管理** | 已安装插件（含本体自带，本体不可修改）+ 禁用/启用/卸载；npm @deepseek-ai 搜索安装；特殊插件 dsh-routing-suite（注入器 + 路由预设，自动二次修复） |
+| **插件管理** | 已安装插件（含本体自带，本体不可修改）+ 禁用/启用/卸载；npm @deepseek-ai 搜索安装（精确/模糊）；特殊插件 dsh-routing-suite / dsh-better-sidebar |
+| **事件管理器** | webui 与 dsh 事件记录（正常不标注、警告黄、错误红）；日志查看 + **打开日志文件夹**；**致命错误弹窗**（查看日志 / 尝试恢复） |
 | **更新 dsh** | 检查更新（GitHub Releases 同步更新内容）；版本选择升级（默认最新）；客户端 bundle 健康检测与一键修复 |
+| **设置** | 基本参数（dsh 端口 / WebUI 端口 / profile，下次启动生效）；**检查启动器更新**（分步更新不中断当前进程，重启完成剩余更新） |
 
 ## 快速开始
 
@@ -198,7 +200,57 @@ tools\plugin.cmd enable <bundle>
 | 浏览器显示旧界面 | 硬刷新 Ctrl+Shift+R（rev 为缓存戳，新页面自动带新 rev） |
 | 更新后插件不生效 | 插件在 `~\.dsh\profiles\web`（用户层），与仓库版本独立；`tools\plugin.cmd` 管理 |
 
+## 事件管理器（「事件管理器」页）
+
+- **事件记录**：webui 与 dsh 产生的事件（环形缓冲 2000 条，SSE 实时推送）
+  - **正常日志**（启动/停止/重启等）不特意标注（info）
+  - **警告事件**黄色标记（如端口未释放、构建许可写入、预设结构异常）
+  - **错误事件**红色标记（如服务器异常退出、更新/构建/插件安装失败）
+  - 支持按级别过滤（全部/错误/警告/正常）+ 计数徽章
+- **日志查看**：可**打开日志文件夹**（`dshRoot\.dshctl\`，含 `server.console.log`）在资源管理器中查看服务端日志
+- **致命错误处理**：检测到致命错误时**终止导致错误的进程**并**弹出错误提示**，可选：
+  - **查看日志**：打开日志目录定位原因
+  - **尝试恢复**：
+    - 更新 dsh 本体造成 → **回退到更新前版本** + 全量重建 + 客户端 bundle/环境校验（快照持久化到 `.dshctl\backups\lastop.json`，后端重启后仍可恢复）
+    - 插件安装造成 → **清除安装内容**（卸载该插件）+ **还原 cordis.patch.yml**（安装前自动备份）
+
+## 设置与启动器更新（「设置」页）
+
+- **基本参数**：dsh 启动端口（webPort）、WebUI 启动端口（launcherPort）、profile；保存后写入 config.json，**下次启动生效**（launcherPort 变更需重启启动器，webPort 变更下次启动 dsh 时生效）
+- **检查启动器更新**：对比本仓库 GitHub Releases 最新版，显示当前/最新版本与更新内容
+- **分步更新（不中断当前进程）**：
+  1. 当前进程内：`git pull` 拉最新源码（已加载模块不受影响）→ `pnpm install` → `pnpm run build`（serveStatic 逐请求读盘 → **前端更新即时生效**）
+  2. 写 `.update-pending` 标记并提示**重启完成剩余更新**
+  3. 重启 `launcher.cmd` 时自动检测标记 → `pnpm install` 收尾 → 清除标记 → 正常启动
+  - 全程**不杀死当前进程**、不产生致命错误；更新失败仅记录错误事件
+
 ## 更新日志
+
+### v0.5.0 — 启动器设置、启动器自更新、会话备份与插件更新分级
+
+- **新增「设置」页**：dsh 端口 / WebUI 端口 / profile 参数（下次启动生效）；检查启动器更新（版本对比 + 更新内容）；**会话备份记录**（时间/原因/手动备份/删除）
+- **启动器分步更新**：git pull → install → build（前端即时生效）→ 写 `.update-pending` 标记 → 提示重启；`launcher.cmd` 重启时自动收尾（补依赖 + 清标记）；全程不中断当前进程
+- **会话备份保护**：dsh 升级与插件安装/更新/卸载前**自动备份 `~/.dsh/sessions`**（`.dshctl/backups/sessions-<ts>/` + `backups.json` 记录），设置页可查看/手动备份/删除
+- **插件更新分级路径**：npx 安装无需手动更新；源码构建（workspace 包）随 dsh 更新；用户安装走 `dsh plugin update`；better-sidebar 按 README 用 `add @latest`；**dsh-routing-suite 暂不更新**
+- **升级后兼容性验证**：dsh 更新完成后自动启动 dsh → HTTP 探活 → 停止，确认插件兼容性
+- **破坏性更新警告**：更新页提示 dsh 预览版阶段存在破坏性更新，贸然升级可能造成致命影响；插件管理页提示操作前自动备份会话（插件市场如 dsh-plugin-hub 安装的插件同样列出，可禁用/卸载）
+- 新 API：`GET /api/launcher/check`、`POST /api/launcher/update`、`POST /api/backup`、`GET /api/backup/list`、`POST /api/backup/delete`、`POST /api/plugins/update`
+- 修复 pnpm 11 脚本预检卡住（`verifyDepsBeforeRun: false`）
+
+### v0.4.3 — 日志滚动修复与白天主题
+
+- **修复日志刷新把页面拉到底**：自动滚动改为只滚动日志列表自身容器（不再用 scrollIntoView 影响外层页面）
+- **新增白天/黑夜主题切换**：顶栏「白天/黑夜」按钮，CSS 变量主题化（深色默认 + `[data-theme="light"]` 浅色覆盖），localStorage 持久化
+- 日志/事件区、弹窗、渐变背景等全部变量化，两主题一致观感
+
+### v0.4.2 — 事件管理器与致命错误恢复
+
+- **新增「事件管理器」页**：事件记录（info 不标注 / warn 黄 / error 红，级别过滤 + 计数）；打开日志文件夹（`.dshctl\`）
+- **致命错误弹窗**：dsh 服务器异常退出 / 更新失败 / 插件安装失败 → 终止错误进程 + 弹窗（查看日志 / 尝试恢复 / 稍后处理）
+- **智能恢复**：更新错误 → 回退更新前版本 + clean 全量重建 + bundle 校验；插件错误 → 卸载插件 + 还原 patch.yml 备份
+- **恢复快照持久化**：`.dshctl\backups\lastop.json`，后端重启后仍可恢复
+- 新 API：`GET /api/events/list`、`POST /api/recover`、`/api/open {target:"logs"}`
+- 日志面板按事件级别着色（错误红 / 警告黄）
 
 ### v0.4.1 — 搜索改进与特殊插件扩展
 

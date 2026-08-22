@@ -26,8 +26,10 @@ export function LogsPanel({ logs }: { logs: LogEntry[] }) {
   };
 
   useEffect(() => {
+    // 只滚动日志列表自身容器，避免 scrollIntoView 把外层页面也拉到底部
     if (autoScroll && stick.current) {
-      bottomRef.current?.scrollIntoView({ behavior: "auto" });
+      const el = listRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
     }
   }, [visible.length, autoScroll]);
 
@@ -85,7 +87,7 @@ export function LogsPanel({ logs }: { logs: LogEntry[] }) {
                   : e.line.startsWith("[launcher]")
                     ? " launcher"
                     : ""
-              }`}
+              }${e.level === "error" ? " error" : e.level === "warn" ? " warn" : ""}`}
             >
               <span className="log-seq">{String(e.seq % 10000).padStart(4, "0")}</span>
               <span className="log-text">{e.line}</span>

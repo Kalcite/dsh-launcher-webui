@@ -23,13 +23,16 @@ function InstalledRow({
   item,
   busy,
   onToggle,
-  onRemove
+  onRemove,
+  onUpdate
 }: {
   item: { name: string; enabled: boolean; builtin?: boolean; dir?: string };
   busy: boolean;
   onToggle: (name: string, disable: boolean) => void;
   onRemove: (name: string) => void;
+  onUpdate: (name: string) => void;
 }) {
+  const noUpdate = item.builtin || item.name.includes("dsh-routing-suite") || item.name.includes("dsh-super-injector");
   return (
     <div className={`prow${item.enabled ? "" : " disabled"}`}>
       <span className={`pstatus ${item.enabled ? "on" : "off"}`} title={item.enabled ? "启用" : "已禁用"} />
@@ -42,8 +45,16 @@ function InstalledRow({
         ) : (
           <em className="pbadge user">用户安装</em>
         )}
+        {item.name.includes("dsh-routing-suite") || item.name.includes("dsh-super-injector") ? (
+          <em className="pbadge fix">暂不更新</em>
+        ) : null}
       </div>
       <div className="pops">
+        {!noUpdate && (
+          <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => onUpdate(item.name)} title="按来源路径更新（自动备份会话）">
+            <RefreshCw size={13} /> 更新
+          </button>
+        )}
         {!item.builtin && (
           <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => onToggle(item.name, item.enabled)} title={item.enabled ? "禁用（重启生效）" : "启用（重启生效）"}>
             {item.enabled ? <PowerOff size={13} /> : <Power size={13} />} {item.enabled ? "禁用" : "启用"}
@@ -148,6 +159,18 @@ export function PluginCard({ busy, setBusy, deployResult }: Props) {
     setBusy(false);
   };
 
+  const update = async (name: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.pluginUpdate(name);
+      if (!r.ok) setError(r.error || "更新失败");
+    } catch (e) {
+      setError(String(e));
+    }
+    setBusy(false);
+  };
+
   const SpecialCard = ({ sp }: { sp: SpecialPlugin }) => (
     <div className="special-card">
       <div className="special-head">
@@ -192,18 +215,24 @@ export function PluginCard({ busy, setBusy, deployResult }: Props) {
         </button>
       </div>
 
+      {/* 会话备份提示 */}
+      <div className="notice-banner" style={{ marginBottom: 14 }}>
+        <AlertTriangle size={13} /> 插件安装/更新/卸载前将<strong>自动备份会话数据</strong>（~/.dsh/sessions），记录可在「设置」页查看；
+        插件市场（如 dsh-plugin-hub）安装的插件同样在此列出，可正常禁用/卸载。
+      </div>
+
       {/* 已安装（含本体自带） */}
       <h3 className="section-title">已安装插件（本体自带不可修改）</h3>
       <div className="plugin-list">
         {overview?.installed.length ? (
           overview.installed.map((p) => (
-            <InstalledRow key={p.name} item={p} busy={busy} onToggle={toggle} onRemove={remove} />
+            <InstalledRow key={p.name} item={p} busy={busy} onToggle={toggle} onRemove={remove} onUpdate={update} />
           ))
         ) : (
           <p className="hint">暂无已安装插件</p>
         )}
         {overview?.external.map((p) => (
-          <InstalledRow key={p.name + "-ext"} item={{ ...p, dir: p.dir }} busy={busy} onToggle={toggle} onRemove={remove} />
+          <InstalledRow key={p.name + "-ext"} item={{ ...p, dir: p.dir }} busy={busy} onToggle={toggle} onRemove={remove} onUpdate={update} />
         ))}
       </div>
 

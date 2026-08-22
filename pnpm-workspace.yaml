@@ -4,3 +4,6 @@ allowBuilds:
 
 # 非交互环境跳过模块目录清理确认
 confirmModulesPurge: false
+
+# 脚本运行前跳过依赖状态验证（version/lockfile 短暂不一致时避免卡住）
+verifyDepsBeforeRun: false

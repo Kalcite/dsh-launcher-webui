@@ -22,10 +22,25 @@ export type EnvInfo = {
   dshRoot: string;
   dshHome: string | null;
   webPort: number;
+  launcherPort: number;
   profile: string | null;
 };
 
-export type LogEntry = { seq: number; line: string };
+export type LogEntry = { seq: number; line: string; level?: "info" | "warn" | "error"; source?: string };
+
+export type EventRecord = {
+  seq: number;
+  ts: number;
+  level: "info" | "warn" | "error";
+  source: string;
+  message: string;
+};
+
+export type FatalInfo = {
+  kind: "update" | "plugin" | "server";
+  message: string;
+  recoverable: boolean;
+};
 
 export type DeployStatus = {
   dshRoot: string;
@@ -91,9 +106,11 @@ export type PluginSearchResult = {
 export type SseMsg =
   | { type: "hello" }
   | { type: "log"; entry: LogEntry }
+  | { type: "event"; event: EventRecord }
   | { type: "status"; status: ServerStatus }
   | { type: "refresh" }
-  | { type: "deploy"; ok: boolean; target?: string; error?: string };
+  | { type: "deploy"; ok: boolean; target?: string; error?: string }
+  | { type: "fatal"; kind: "update" | "plugin" | "server"; message: string; recoverable: boolean };
 
 async function j<T>(res: Response): Promise<T> {
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -107,7 +124,7 @@ export const api = {
     fetch(`/api/logs?tail=${tail}`).then((r) => j<{ lines: LogEntry[]; nextSeq: number }>(r)),
   action: (a: "start" | "stop" | "restart") =>
     fetch(`/api/server/${a}`, { method: "POST" }).then((r) => j<{ ok: boolean; error?: string }>(r)),
-  open: (target: "web" | "folder" | "vscode") =>
+  open: (target: "web" | "folder" | "vscode" | "logs") =>
     fetch("/api/open", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -139,7 +156,7 @@ export const api = {
     }).then((r) => j<{ ok: boolean; started?: boolean; error?: string }>(r)),
   updateRepair: () =>
     fetch("/api/update/repair", { method: "POST" }).then((r) => j<{ ok: boolean; started?: boolean; error?: string }>(r)),
-  saveConfig: (body: { dshRoot?: string; dshHome?: string | null; webPort?: number }) =>
+  saveConfig: (body: { dshRoot?: string; dshHome?: string | null; webPort?: number; launcherPort?: number; profile?: string | null }) =>
     fetch("/api/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -162,6 +179,42 @@ export const api = {
     }).then((r) => j<{ ok: boolean; started?: boolean; error?: string }>(r)),
   pluginRemove: (pkg: string) =>
     fetch("/api/plugins/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pkg })
+    }).then((r) => j<{ ok: boolean; started?: boolean; error?: string }>(r)),
+  eventsList: (since = 0) =>
+    fetch(`/api/events/list?since=${since}`).then((r) =>
+      j<{ events: EventRecord[]; nextSeq: number; lastOp: { kind: string; ts: number; data: unknown } | null }>(r)
+    ),
+  recover: (kind: "update" | "plugin") =>
+    fetch("/api/recover", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind })
+    }).then((r) => j<{ ok: boolean; started?: boolean; error?: string }>(r)),
+  launcherCheck: () => fetch("/api/launcher/check").then((r) =>
+    j<{ current: string; latest: { tag: string; name: string; publishedAt: string; body: string } | null; hasUpdate: boolean; error: string | null; repo: string }>(r)
+  ),
+  launcherUpdate: () =>
+    fetch("/api/launcher/update", { method: "POST" }).then((r) => j<{ ok: boolean; started?: boolean; error?: string }>(r)),
+  backupList: () => fetch("/api/backup/list").then((r) =>
+    j<{ backups: { id: string; ts: number; reason: string; files: number; size: number; skipped?: boolean }[] }>(r)
+  ),
+  backup: (reason?: string) =>
+    fetch("/api/backup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason })
+    }).then((r) => j<{ ok: boolean; id?: string; error?: string }>(r)),
+  backupDelete: (id: string) =>
+    fetch("/api/backup/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id })
+    }).then((r) => j<{ ok: boolean; error?: string }>(r)),
+  pluginUpdate: (pkg: string) =>
+    fetch("/api/plugins/update", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pkg })
