@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   Rocket,
   FolderSearch,
+  FolderOpen,
   CheckCircle2,
   XCircle,
   GitBranch,
@@ -67,9 +68,23 @@ export function DeployCard({ env, busy, setBusy, deployResult }: Props) {
     }
   }, []);
 
+  // 自动检查仅跟随 dshRoot 配置变化（字符串引用），避免 3s env 轮询覆盖手动检查结果
   useEffect(() => {
-    if (env) check();
-  }, [env, check]);
+    if (env?.dshRoot) check();
+  }, [env?.dshRoot, check]);
+
+  // Windows 原生文件夹选择：选完自动填入并立即检查
+  const pick = async () => {
+    try {
+      const r = await api.pickDir();
+      if (r.ok && r.path) {
+        setDir(r.path);
+        check(r.path);
+      }
+    } catch {
+      /* 用户取消或对话框失败：忽略 */
+    }
+  };
 
   const doDeploy = async () => {
     setBusy(true);
@@ -130,6 +145,9 @@ export function DeployCard({ env, busy, setBusy, deployResult }: Props) {
             className="grow-input"
           />
         </div>
+        <button className="btn btn-ghost btn-sm" onClick={pick} title="打开文件夹选择器">
+          <FolderOpen size={14} /> 浏览…
+        </button>
         <button className="btn btn-ghost btn-sm" onClick={() => check(dir.trim() || undefined)} title="检查该目录状态">
           <FolderSearch size={14} /> 检查
         </button>

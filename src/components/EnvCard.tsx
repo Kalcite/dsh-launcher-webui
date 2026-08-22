@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Cpu, Save, RotateCcw, Home } from "lucide-react";
+import { Cpu, Save, RotateCcw, Home, FolderOpen } from "lucide-react";
 import { api, type EnvInfo } from "../api";
 
 function Row({ k, v, code }: { k: string; v: string | null; code?: boolean }) {
@@ -21,6 +21,15 @@ export function EnvCard({ env }: { env: EnvInfo | null }) {
     if (r.ok) {
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
+    }
+  };
+
+  const pickHome = async () => {
+    try {
+      const r = await api.pickDir();
+      if (r.ok && r.path) setHome(r.path);
+    } catch {
+      /* 用户取消或对话框失败：忽略 */
     }
   };
 
@@ -69,6 +78,9 @@ export function EnvCard({ env }: { env: EnvInfo | null }) {
               className="grow-input"
             />
           </div>
+          <button className="btn btn-ghost btn-sm" onClick={pickHome} title="打开文件夹选择器">
+            <FolderOpen size={14} /> 浏览…
+          </button>
           <button className="btn btn-ghost btn-sm" onClick={doSaveHome} title="保存 DSH_HOME（重启 dsh 服务器后生效）">
             <Save size={13} /> 保存
           </button>

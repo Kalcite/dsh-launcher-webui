@@ -34,8 +34,8 @@ J:\dsh-launcher\                 ← 套件根（运行时约 172MB，可整体�
 
 | 页面 | 功能 |
 |---|---|
-| **概览** | 服务器启停/重启 + HTTP 探活 + PID/日志大小；环境信息（node/pnpm/git/便携 Node/dshRoot）；一键打开 Web UI / 仓库目录 / VSCode；实时日志面板（过滤/跟随/清空视图） |
-| **部署 dsh** | 一键部署到任意目录（clone + install + build，SSE 进度）；目录状态检查；切换 dshRoot（不部署仅切换） |
+| **概览** | 服务器启停/重启 + HTTP 探活 + PID/日志大小；环境信息（node/pnpm/git/便携 Node/dshRoot）；数据目录 DSH_HOME 配置（支持**文件夹选择器**）；一键打开 Web UI / 仓库目录 / VSCode；实时日志面板（过滤/跟随/清空视图） |
+| **部署 dsh** | 一键部署到任意目录（clone + install + build，SSE 进度）；目录状态检查（**支持文件夹选择器**，选完自动检查）；切换 dshRoot（不部署仅切换） |
 | **更新 dsh** | 检查更新（GitHub Releases 同步更新内容）；版本选择升级（默认最新）；客户端 bundle 健康检测与一键修复 |
 
 ## 快速开始
@@ -185,6 +185,11 @@ tools\plugin.cmd enable <bundle>
 | 更新后插件不生效 | 插件在 `~\.dsh\profiles\web`（用户层），与仓库版本独立；`tools\plugin.cmd` 管理 |
 
 ## 更新日志
+
+### v0.3.2 — 目录选择器与检查稳定性
+
+- **新增 Windows 原生文件夹选择器**：部署目录、DSH_HOME 数据目录均可点「浏览…」弹出系统文件夹对话框选择，选完自动填入并立即检查（`POST /api/pick-dir`，FolderBrowserDialog）
+- **修复部署页检查被轮询覆盖**：手动检查指定目录后不再被 3s 状态轮询覆盖回默认 dshRoot（自动检查仅跟随 dshRoot 配置变化触发）
 
 ### v0.3.1 — 数据目录 DSH_HOME 可独立选取
 

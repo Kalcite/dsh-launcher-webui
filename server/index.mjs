@@ -875,6 +875,24 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, { ok: true, target });
     }
 
+    // ── 原生文件夹选择（Windows FolderBrowserDialog，-STA 线程）──
+    if (req.method === "POST" && p === "/api/pick-dir") {
+      const script = [
+        "Add-Type -AssemblyName System.Windows.Forms",
+        "$f = New-Object System.Windows.Forms.FolderBrowserDialog",
+        "$f.Description = '选择目录'",
+        "$f.ShowNewFolderButton = $true",
+        "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.SelectedPath }"
+      ].join("; ");
+      const r = await new Promise((resolve) => {
+        execFile("powershell", ["-NoProfile", "-STA", "-Command", script], { windowsHide: false, timeout: 120000, encoding: "utf8" }, (err, stdout) => {
+          resolve({ ok: !err, out: String(stdout || "").trim() });
+        });
+      });
+      // 取消选择（DialogResult.Cancel）不是错误：out 为空 → path null
+      return sendJson(res, { ok: r.ok, path: r.out || null, error: r.ok ? undefined : (r.out || "文件夹选择失败") });
+    }
+
     return serveStatic(req, res, url);
   } catch (err) {
     sendJson(res, { ok: false, error: String(err?.message ?? err) }, 500);

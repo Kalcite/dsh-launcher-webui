@@ -80,6 +80,9 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target })
     }).then((r) => j<{ ok: boolean }>(r)),
+  /** 打开 Windows 原生文件夹选择对话框，返回所选路径（取消时 path 为 null） */
+  pickDir: () =>
+    fetch("/api/pick-dir", { method: "POST" }).then((r) => j<{ ok: boolean; path?: string | null }>(r)),
   deployStatus: (dir?: string) =>
     fetch(`/api/deploy/status${dir ? `?dir=${encodeURIComponent(dir)}` : ""}`).then((r) => j<DeployStatus>(r)),
   deploy: (body: { targetDir?: string; skipBuild?: boolean }) =>
