@@ -571,11 +571,13 @@ async function launcherUpdate() {
       }
       const co = await run("git", ["-C", LAUNCHER_ROOT, "checkout", "-B", "master", "FETCH_HEAD"]);
       if (!co.ok) return { ok: false, error: `无法切回 master 分支: ${co.out}` };
+      // 补上游追踪（best-effort），方便后续命令行 git pull；失败不影响更新
+      await run("git", ["-C", LAUNCHER_ROOT, "branch", "--set-upstream-to=origin/master", "master"]);
       pushLog("[launcher] 已切回 master 分支");
     }
-    // 1) git pull
-    pushLog("[launcher] 步骤 1/4: git pull --ff-only…");
-    let r = await runStream("git", ["-C", LAUNCHER_ROOT, "pull", "--ff-only"], { cwd: LAUNCHER_ROOT, env: pnpmEnv });
+    // 1) git pull（显式 origin master：兼容刚切回、暂无上游追踪的分支）
+    pushLog("[launcher] 步骤 1/4: git pull --ff-only origin master…");
+    let r = await runStream("git", ["-C", LAUNCHER_ROOT, "pull", "--ff-only", "origin", "master"], { cwd: LAUNCHER_ROOT, env: pnpmEnv });
     if (r.code !== 0) return { ok: false, error: "git pull 失败（工作区可能有未提交改动，请先提交或还原）" };
     // 2) pnpm install
     pushLog("[launcher] 步骤 2/4: pnpm install…");

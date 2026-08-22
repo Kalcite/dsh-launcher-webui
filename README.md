@@ -227,6 +227,11 @@ tools\plugin.cmd enable <bundle>
 
 ## 更新日志
 
+### v0.6.3 — 修复 detached HEAD 切换后 pull 失败（无上游追踪）
+
+- 修复 v0.6.2 的遗漏：`checkout -B master` 切回分支后本地分支**暂无上游追踪**，`git pull --ff-only` 仍会失败（"no tracking information"）
+- 更新器改为 **`git pull --ff-only origin master`**（显式指定远端+分支，无需上游配置），并在切回后 best-effort 补设 `branch --set-upstream-to=origin/master`
+
 ### v0.6.2 — 启动器更新器修复（detached HEAD + zip 安装模式）
 
 - **修复内置更新器报错** "You are not currently on a branch"：git 安装若处于 **detached HEAD**（如手动 `git checkout <tag>` / 标签检出），更新器现在会自动 `fetch origin` → 校验本地是远程祖先（安全）→ 切回 `master` 分支 → 再 `git pull --ff-only`；与远程分叉时明确报错而非盲目覆盖
