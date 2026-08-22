@@ -23,8 +23,9 @@ J:\dsh-launcher\                 ← 套件根（运行时约 172MB，可整体�
 ├── server\index.mjs   零依赖 Node 后端（启停/部署/更新/修复/SSE/静态）
 ├── src\ + dist\       React 启动器 UI（dist\ 随套件分发，开箱即用）
 ├── tools\plugin.py    插件管理（Python + pyyaml 编辑 cordis.patch.yml）
-├── launcher.cmd       双击入口：启动后端 + 自动开浏览器
-├── launcher-stop.cmd  停止后端（支持 --port N）
+├── tools\launcher_boot.py   启动引导（全部启动/停止/收尾逻辑，.cmd 仅调用）
+├── launcher.cmd       双击入口：调用 launcher_boot.py 启动后端 + 自动开浏览器
+├── launcher-stop.cmd  停止后端（调用 launcher_boot.py --stop，支持 --port N）
 ├── setup.cmd          新机器引导：便携 Node/Python/venv + 构建前端
 ├── config.json        dshRoot 指向独立目录（相对路径可用）
 └── dsh-test\          （可选）独立测试沙盒，已 gitignore
@@ -225,6 +226,11 @@ tools\plugin.cmd enable <bundle>
   - 全程**不杀死当前进程**、不产生致命错误；更新失败仅记录错误事件
 
 ## 更新日志
+
+### v0.5.1 — 启动逻辑脚本化（修复 launcher.cmd 闪退）
+
+- **修复 launcher.cmd 闪退**（"... was unexpected at this time"）：`.update-pending` 收尾段的 cmd 括号块变量预展开崩溃
+- **启动逻辑全部移入 `tools/launcher_boot.py`**：更新收尾 / 已运行检测 / node 选择 / 端口解析 / 停止（--stop）全部 Python 承载，`launcher.cmd` / `launcher-stop.cmd` 仅负责调用（纯 ASCII+CRLF + goto 结构，规避 cmd 语法坑）
 
 ### v0.5.0 — 启动器设置、启动器自更新、会话备份与插件更新分级
 
