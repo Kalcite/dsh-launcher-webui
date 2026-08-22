@@ -205,7 +205,7 @@ export const api = {
       body: JSON.stringify({ kind })
     }).then((r) => j<{ ok: boolean; started?: boolean; error?: string }>(r)),
   launcherCheck: () => fetch("/api/launcher/check").then((r) =>
-    j<{ current: string; latest: { tag: string; name: string; publishedAt: string; body: string } | null; hasUpdate: boolean; error: string | null; repo: string }>(r)
+    j<{ current: string; latest: { tag: string; name: string; publishedAt: string; body: string } | null; hasUpdate: boolean; error: string | null; repo: string; mode: "git" | "zip" }>(r)
   ),
   launcherUpdate: () =>
     fetch("/api/launcher/update", { method: "POST" }).then((r) => j<{ ok: boolean; started?: boolean; error?: string }>(r)),

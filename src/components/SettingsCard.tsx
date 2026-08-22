@@ -170,6 +170,10 @@ export function SettingsCard({ env, busy, setBusy, deployResult }: Props) {
           <span className="lu-label">最新版本</span>
           <span className="lu-value mono">{check?.latest ? check.latest.tag : check?.error ? "获取失败" : "—"}</span>
         </div>
+        <div className="lu-row">
+          <span className="lu-label">安装方式</span>
+          <span className="lu-value mono">{check?.mode === "zip" ? "zip 源码包" : check?.mode === "git" ? "git 仓库" : "—"}</span>
+        </div>
         {check?.hasUpdate && (
           <div className="notice-banner" style={{ marginTop: 8 }}>
             <AlertTriangle size={13} /> 发现新版本 {check.latest?.tag}（当前 v{check.current}）
@@ -185,13 +189,14 @@ export function SettingsCard({ env, busy, setBusy, deployResult }: Props) {
           <button className="btn btn-ghost" disabled={checking} onClick={doCheck}>
             <RefreshCw size={14} /> 检查更新
           </button>
-          <button className="btn btn-primary" disabled={busy || !check?.hasUpdate} onClick={doUpdate} title="分步更新：git pull + install + build，不中断当前进程；重启完成剩余更新">
+          <button className="btn btn-primary" disabled={busy || !check?.hasUpdate} onClick={doUpdate} title={check?.mode === "zip" ? "下载最新源码包 → install/build → 替换（保留 config.json 与数据），重启生效" : "分步更新：git pull + install + build，不中断当前进程；重启完成剩余更新"}>
             <Download size={14} /> 更新启动器
           </button>
         </div>
         <p className="hint">
-          更新采用<b>分步执行</b>：拉取源码 → 安装依赖 → 重建前端（即时生效），<b>不终止当前进程</b>；
-          基本更新完成后提示重启，重启时自动完成剩余内容并清除标记。
+          {check?.mode === "zip"
+            ? <>更新采用<b>源码包模式</b>：下载最新 Release 源码包 → 安装依赖 → 重建前端并<b>整体替换</b>（保留 config.json / 备份数据 / 内置运行时），<b>不终止当前进程</b>；完成后重启启动器生效。</>
+            : <>更新采用<b>分步执行</b>：拉取源码（detached HEAD 自动切回 master）→ 安装依赖 → 重建前端（即时生效），<b>不终止当前进程</b>；基本更新完成后提示重启，重启时自动完成剩余内容并清除标记。</>}
         </p>
       </div>
 

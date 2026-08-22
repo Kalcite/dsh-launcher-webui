@@ -1,6 +1,6 @@
 {
   "name": "dsh-launcher",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "DeepSeek Harness 多功能启动器（Web 仪表盘 + 零依赖 Node 后端）",
   "private": true,
   "type": "module",

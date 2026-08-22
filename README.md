@@ -227,6 +227,14 @@ tools\plugin.cmd enable <bundle>
 
 ## 更新日志
 
+### v0.6.2 — 启动器更新器修复（detached HEAD + zip 安装模式）
+
+- **修复内置更新器报错** "You are not currently on a branch"：git 安装若处于 **detached HEAD**（如手动 `git checkout <tag>` / 标签检出），更新器现在会自动 `fetch origin` → 校验本地是远程祖先（安全）→ 切回 `master` 分支 → 再 `git pull --ff-only`；与远程分叉时明确报错而非盲目覆盖
+- **兼容 zip 下载构建的安装方式**（无 `.git`）：更新器自动检测安装模式
+  - git 安装：走 git pull 更新
+  - zip 安装：**下载最新 Release 源码包** → Windows 自带 tar 解压 → 在新源码目录 `pnpm install` + `pnpm run build` → **整体替换**启动器目录（保留 `config.json` / `.dshctl` 数据 / `.runtime` 内置运行时）→ 写重启标记，全程不中断当前进程
+- 设置页显示「安装方式」（git 仓库 / zip 源码包），按钮与说明随模式变化
+
 ### v0.6.1 — 会话级 Token 分析
 
 - **「用量分析」页新增会话级分析**

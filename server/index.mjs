@@ -447,6 +447,8 @@ async function launcherCheck() {
   try {
     current = JSON.parse(readFileSync(path.join(LAUNCHER_ROOT, "package.json"), "utf8")).version;
   } catch { /* 保持 ? */ }
+  // 安装模式：git clone（可 git pull） vs 下载 zip 构建（无 .git，需下载源码包更新）
+  const mode = existsSync(path.join(LAUNCHER_ROOT, ".git")) ? "git" : "zip";
   let latest = null, error = null;
   try {
     const res = await fetch("https://api.github.com/repos/Kalcite/dsh-launcher-webui/releases/latest", {
@@ -462,24 +464,115 @@ async function launcherCheck() {
     error = String(e?.message ?? e);
   }
   const hasUpdate = latest ? compareVersions(current, latest.tag.replace(/^v/, "")) < 0 : false;
-  return { current, latest, hasUpdate, error, repo: "Kalcite/dsh-launcher-webui" };
+  return { current, latest, hasUpdate, error, repo: "Kalcite/dsh-launcher-webui", mode };
+}
+
+/**
+ * zip 模式更新（无 .git 的下载 zip 构建）：
+ * 1) 下载最新版 GitHub 源码包（refs/tags/<tag>.zip）
+ * 2) Windows 自带 tar(bsdtar) 解压到 .dshctl/update-stage-* 
+ * 3) 在新源码目录执行 pnpm install + pnpm run build（产出全新 dist/node_modules）
+ * 4) 整体替换启动器目录，保留 config.json / .dshctl（用户数据）/ .runtime（内置 node）
+ * 5) 写 .update-pending 重启标记
+ */
+async function launcherUpdateZip(env) {
+  const chk = await launcherCheck();
+  if (chk.error) return { ok: false, error: `获取最新版本失败: ${chk.error}` };
+  if (!chk.latest) return { ok: false, error: "未获取到可用版本" };
+  const tag = chk.latest.tag;
+  if (chk.current !== "?" && compareVersions(chk.current, tag.replace(/^v/, "")) >= 0) {
+    return { ok: false, error: `已是最新版本（v${chk.current}）` };
+  }
+  const stage = path.join(LAUNCHER_ROOT, ".dshctl", `update-stage-${Date.now()}`);
+  try {
+    mkdirSync(stage, { recursive: true });
+    const zipPath = path.join(stage, "src.zip");
+    pushLog(`[launcher] zip 模式：下载 ${tag} 源码包…`);
+    const res = await fetch(`https://github.com/Kalcite/dsh-launcher-webui/archive/refs/tags/${tag}.zip`, {
+      headers: { "User-Agent": "dsh-launcher" }, signal: AbortSignal.timeout(180000)
+    });
+    if (!res.ok) return { ok: false, error: `下载源码包失败 HTTP ${res.status}` };
+    writeFileSync(zipPath, Buffer.from(await res.arrayBuffer()));
+    pushLog(`[launcher] zip 模式：解压源码包（${(statSync(zipPath).size / 1024 / 1024).toFixed(1)} MB）…`);
+    // Windows 10+ 自带 bsdtar（System32\tar.exe），支持 zip；优先用全路径，兜底 PATH 里的 tar
+    const sysTar = path.join(process.env.WINDIR ?? "C:\\Windows", "System32", "tar.exe");
+    const tarExe = existsSync(sysTar) ? sysTar : "tar";
+    const ex = await runStream(tarExe, ["-xf", zipPath, "-C", stage], { cwd: stage, env });
+    if (ex.code !== 0) return { ok: false, error: "解压失败（需要 Windows 10+ 自带 tar，或系统 tar 在 PATH）" };
+    // 定位顶层目录（GitHub zip 顶层为 dsh-launcher-webui-<tag>/）
+    const inner = readdirSync(stage)
+      .map((n) => path.join(stage, n))
+      .find((p) => statSync(p).isDirectory() && path.basename(p) !== ".dshctl");
+    if (!inner || !existsSync(path.join(inner, "package.json"))) {
+      return { ok: false, error: "源码包结构异常（缺少 package.json）" };
+    }
+    pushLog("[launcher] zip 模式：安装依赖（pnpm install）…");
+    let r = kitPnpmCmd()
+      ? await runStream("cmd", ["/c", kitPnpmCmd(), "install"], { cwd: inner, env })
+      : await runStream("cmd", ["/c", "pnpm install"], { cwd: inner, env });
+    if (r.code !== 0) return { ok: false, error: `pnpm install 失败 (exit ${r.code})` };
+    pushLog("[launcher] zip 模式：构建前端（pnpm run build）…");
+    r = kitPnpmCmd()
+      ? await runStream("cmd", ["/c", kitPnpmCmd(), "run", "build"], { cwd: inner, env })
+      : await runStream("cmd", ["/c", "pnpm run build"], { cwd: inner, env });
+    if (r.code !== 0) return { ok: false, error: `pnpm run build 失败 (exit ${r.code})` };
+    // 整体替换（保留用户数据与内置运行时）
+    pushLog("[launcher] zip 模式：替换启动器文件（保留 config.json / .dshctl / .runtime）…");
+    const keep = new Set(["config.json", ".dshctl", ".runtime"]);
+    for (const name of readdirSync(LAUNCHER_ROOT)) {
+      if (keep.has(name)) continue;
+      rmSync(path.join(LAUNCHER_ROOT, name), { recursive: true, force: true });
+    }
+    for (const name of readdirSync(inner)) {
+      if (keep.has(name)) continue;
+      cpSync(path.join(inner, name), path.join(LAUNCHER_ROOT, name), { recursive: true });
+    }
+    writeFileSync(path.join(LAUNCHER_ROOT, ".update-pending"),
+      JSON.stringify({ ts: Date.now(), phase: 1, mode: "zip", message: "基本更新完成，重启后完成剩余更新" }), "utf8");
+    pushLog(`[launcher] ══ zip 模式更新完成（${tag}），请重启启动器 ══`);
+    return { ok: true, phase: 1, mode: "zip", message: `更新完成（${tag}），重启启动器后生效` };
+  } catch (e) {
+    return { ok: false, error: `zip 更新失败: ${e?.message ?? e}` };
+  } finally {
+    try { rmSync(stage, { recursive: true, force: true }); } catch { /* 清理失败忽略 */ }
+  }
 }
 
 /**
  * 启动器更新（分步，不中断当前进程）：
- * 1) git pull 拉最新源码（已加载模块不受文件替换影响，当前进程安全）
- * 2) pnpm install（新依赖）
- * 3) pnpm build 重建 dist（serveStatic 逐请求读盘 → 前端立即生效）
- * 4) 写 .update-pending 标记 → 提示重启；重启时 launcher.cmd 完成剩余更新
+ * git 模式：确保在分支上（detached HEAD 自动切回 master）→ git pull --ff-only → install → build → 重启标记
+ * zip 模式（无 .git）：下载源码包 → install/build → 整体替换 → 重启标记
  */
 async function launcherUpdate() {
   if (state.busy) return { ok: false, error: "已有操作在执行，请稍候" };
   pushLog("[launcher] ══ 启动器更新（分步：不中断当前进程）══");
   state.busy = true;
   try {
-    const pnpm = kitPnpmCmd();
     // CI=true 跳过 pnpm 的 deps 状态检查（避免 version/lockfile 短暂不一致时卡住）
     const pnpmEnv = { ...process.env, CI: "true" };
+    const pnpm = kitPnpmCmd();
+    const isGit = existsSync(path.join(LAUNCHER_ROOT, ".git"));
+
+    if (!isGit) {
+      pushLog("[launcher] 检测到 zip 安装（无 .git），走源码包下载更新…");
+      const zr = await launcherUpdateZip(pnpmEnv);
+      return zr.ok ? { ok: true, ...zr } : zr;
+    }
+
+    // ── git 模式：确保当前在分支上（兼容 detached HEAD / 标签检出） ──
+    const br = await run("git", ["-C", LAUNCHER_ROOT, "branch", "--show-current"]);
+    if (!br.ok || !br.out) {
+      pushLog("[launcher] 当前不在分支上（detached HEAD），尝试切回 master 跟踪 origin/master…");
+      const f = await run("git", ["-C", LAUNCHER_ROOT, "fetch", "origin"], { timeout: 60000 });
+      if (!f.ok) return { ok: false, error: `git fetch 失败: ${f.out || "网络错误"}` };
+      const anc = await run("git", ["-C", LAUNCHER_ROOT, "merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD"]);
+      if (!anc.ok) {
+        return { ok: false, error: "本地存在与远程分叉的提交（可能是手动改动），为安全起见请手动处理 git 状态后再更新" };
+      }
+      const co = await run("git", ["-C", LAUNCHER_ROOT, "checkout", "-B", "master", "FETCH_HEAD"]);
+      if (!co.ok) return { ok: false, error: `无法切回 master 分支: ${co.out}` };
+      pushLog("[launcher] 已切回 master 分支");
+    }
     // 1) git pull
     pushLog("[launcher] 步骤 1/4: git pull --ff-only…");
     let r = await runStream("git", ["-C", LAUNCHER_ROOT, "pull", "--ff-only"], { cwd: LAUNCHER_ROOT, env: pnpmEnv });
