@@ -1,7 +1,7 @@
-import { Github, LayoutDashboard, Rocket, RefreshCw, Puzzle, Command, Zap, ListTodo, Settings } from "lucide-react";
+import { Github, LayoutDashboard, Rocket, RefreshCw, Puzzle, Command, Zap, ListTodo, Settings, BarChart3 } from "lucide-react";
 import type { EnvInfo } from "../api";
 
-export type Page = "overview" | "deploy" | "update" | "plugins" | "events" | "settings";
+export type Page = "overview" | "deploy" | "update" | "plugins" | "events" | "settings" | "usage";
 
 type NavItem = {
   icon: React.ComponentType<{ size?: number | string; strokeWidth?: number | string }>;
@@ -14,6 +14,7 @@ const NAV: NavItem[] = [
   { icon: LayoutDashboard, label: "概览", page: "overview" },
   { icon: Rocket, label: "管理 dsh", page: "deploy" },
   { icon: Puzzle, label: "插件管理", page: "plugins" },
+  { icon: BarChart3, label: "用量分析", page: "usage" },
   { icon: ListTodo, label: "事件管理器", page: "events" },
   { icon: RefreshCw, label: "更新 dsh", page: "update" },
   { icon: Settings, label: "设置", page: "settings" },

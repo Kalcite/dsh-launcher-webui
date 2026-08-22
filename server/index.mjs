@@ -30,6 +30,7 @@ import path from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import * as plugins from "./plugins.mjs";
+import * as usage from "./usage.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LAUNCHER_ROOT = path.resolve(__dirname, "..");
@@ -808,7 +809,8 @@ function persistConfig() {
       webPort: cfg.webPort,
       launcherPort: cfg.launcherPort,
       profile: cfg.profile,
-      openBrowser: cfg.openBrowser
+      openBrowser: cfg.openBrowser,
+      pricing: cfg.pricing
     };
     writeFileSync(path.join(LAUNCHER_ROOT, "config.json"), JSON.stringify(payload, null, 2) + "\n", "utf8");
     pushLog(`[launcher] 配置已保存 → config.json (dshRoot: ${cfg.dshRoot})`);
@@ -1253,6 +1255,17 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       if (!body?.id) return sendJson(res, { ok: false, error: "缺少 id" }, 400);
       return sendJson(res, deleteBackup(String(body.id)));
+    }
+
+    // ── 用量分析（token 消耗 + 计费）──
+    if (req.method === "GET" && p === "/api/usage") {
+      return sendJson(res, await usage.usageOverview(cfg));
+    }
+    if (req.method === "POST" && p === "/api/usage/pricing") {
+      const body = await readBody(req);
+      cfg.pricing = { ...(cfg.pricing ?? {}), ...(body ?? {}) };
+      persistConfig();
+      return sendJson(res, { ok: true, pricing: cfg.pricing });
     }
 
     // ── 启动器设置 / 自身更新 ──

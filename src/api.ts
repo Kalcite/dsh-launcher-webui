@@ -103,6 +103,17 @@ export type PluginSearchResult = {
   error: string | null;
 };
 
+/** 计费单价与峰谷规则（元 / 百万 token）；默认值来自 DeepSeek 官方定价文档 */
+export type UsagePricing = {
+  inputPerM: number;        // 高峰：输入（缓存未命中）
+  outputPerM: number;       // 高峰：输出
+  cacheReadPerM: number;    // 高峰：输入（缓存命中）
+  cacheWritePerM: number;   // 高峰：缓存写入
+  offPeakMultiplier: number; // 空闲 = 高峰 × 该系数（官方 0.5）
+  peakSlots: { start: number; end: number }[]; // 高峰时段（北京时间小时）
+  weekendFlat: boolean;     // 周末全天按空闲价
+};
+
 export type SseMsg =
   | { type: "hello" }
   | { type: "log"; entry: LogEntry }
@@ -218,7 +229,24 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pkg })
-    }).then((r) => j<{ ok: boolean; started?: boolean; error?: string }>(r))
+    }).then((r) => j<{ ok: boolean; started?: boolean; error?: string }>(r)),
+  usage: () => fetch("/api/usage").then((r) =>
+    j<{
+      home: string;
+      pricing: UsagePricing;
+      totals: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; sessions: number; activeDays: number };
+      byDay: { date: string; input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }[];
+      byHour: { hour: number; input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }[];
+      byHourWeek: { weekday: number; hour: number; input: number; output: number; cacheRead: number; cacheWrite: number }[];
+      bySession: { id: string; project: string; models: string[]; input: number; output: number; cacheRead: number; cacheWrite: number; updatedAt: number | null; cost: number }[];
+    }>(r)
+  ),
+  usagePricing: (body: Partial<UsagePricing>) =>
+    fetch("/api/usage/pricing", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then((r) => j<{ ok: boolean; pricing: unknown }>(r))
 };
 
 /** SSE 连接（自动重连由 EventSource 内置处理），返回关闭函数 */

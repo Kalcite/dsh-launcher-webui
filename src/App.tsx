@@ -10,6 +10,7 @@ import { UpdateCard } from "./components/UpdateCard";
 import { PluginCard } from "./components/PluginCard";
 import { EventsCard } from "./components/EventsCard";
 import { SettingsCard } from "./components/SettingsCard";
+import { UsageCard } from "./components/UsageCard";
 import { ErrorModal } from "./components/ErrorModal";
 import { LogsPanel } from "./components/LogsPanel";
 
@@ -123,7 +124,9 @@ export default function App() {
                       ? "事件记录 · 日志查看 · 错误恢复"
                       : page === "settings"
                         ? "基本参数 · 启动器更新"
-                        : "dsh 更新 · 检查 Releases 与版本升级"}
+                        : page === "usage"
+                          ? "Token 消耗 · 计费账单 · 热力图"
+                          : "dsh 更新 · 检查 Releases 与版本升级"}
               <span className="badge-mvp">MVP</span>
             </p>
           </div>
@@ -162,6 +165,8 @@ export default function App() {
           <EventsCard busy={busy} setBusy={setBusy} deployResult={deployResult} />
         ) : page === "settings" ? (
           <SettingsCard env={env} busy={busy} setBusy={setBusy} deployResult={deployResult} />
+        ) : page === "usage" ? (
+          <UsageCard />
         ) : (
           <UpdateCard busy={busy} setBusy={setBusy} deployResult={deployResult} />
         )}

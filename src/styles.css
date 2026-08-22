@@ -608,6 +608,324 @@ body {
 .backup-list .lu-row { border-bottom: 1px dashed var(--border); }
 .backup-list .lu-row:last-child { border-bottom: none; }
 
+/* ---------- 用量分析页 ---------- */
+
+.usage-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.ustat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--well-2);
+}
+.ustat-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+.ustat-value { font-size: 16px; font-weight: 700; }
+.ustat-value.accent { color: var(--accent); }
+
+.heatmap { margin-bottom: 4px; }
+.heatmap-months {
+  display: grid;
+  grid-template-columns: repeat(53, 1fr);
+  margin-left: 28px;
+  font-size: 10px;
+  color: var(--text-faint);
+  gap: 2px;
+  margin-bottom: 4px;
+}
+.heatmap-grid {
+  display: flex;
+  gap: 3px;
+}
+.heatmap-col { display: flex; flex-direction: column; gap: 3px; }
+.hm-cell {
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+  background: var(--border);
+}
+.hm-cell.l1 { background: rgba(59, 130, 246, 0.25); }
+.hm-cell.l2 { background: rgba(59, 130, 246, 0.5); }
+.hm-cell.l3 { background: rgba(59, 130, 246, 0.75); }
+.hm-cell.l4 { background: #2563eb; box-shadow: 0 0 4px rgba(37, 99, 235, 0.5); }
+.heatmap-legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  justify-content: flex-end;
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.heatmap-legend .hm-cell { display: inline-block; }
+
+.pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.usage-table {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.ut-head, .ut-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr 1fr;
+  gap: 8px;
+  padding: 6px 12px;
+}
+.ut-head {
+  background: var(--well-2);
+  color: var(--text-faint);
+  font-size: 11px;
+  position: sticky;
+  top: 0;
+}
+.ut-row { border-top: 1px dashed var(--border); color: var(--text-dim); }
+.ut-row .warn { color: var(--warn); font-weight: 600; }
+
+/* 用量分析：饼图 / 柱状图 / 峰谷账单 / 星期热力 */
+
+.usage-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+@media (max-width: 900px) { .usage-cols { grid-template-columns: 1fr; } }
+.usage-col { min-width: 0; }
+
+.pie-wrap {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+.pie {
+  position: relative;
+  width: 140px;
+  height: 140px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.pie-hole {
+  position: absolute;
+  inset: 26px;
+  border-radius: 50%;
+  background: var(--well-2);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+}
+.pie-total { font-size: 16px; font-weight: 800; }
+.pie-sub { font-size: 10px; color: var(--text-faint); }
+.pie-empty {
+  display: grid;
+  place-items: center;
+  width: 140px;
+  height: 140px;
+  border-radius: 50%;
+  border: 1px dashed var(--border-strong);
+  color: var(--text-faint);
+  font-size: 12px;
+}
+.pie-legend { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.pie-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.pie-dot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+.pie-lbl { color: var(--text-dim); }
+.pie-val { margin-left: auto; font-weight: 600; white-space: nowrap; }
+.pie-price { color: var(--text-faint); font-size: 11px; white-space: nowrap; }
+
+.billing-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+}
+.billing-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--well-2);
+}
+.billing-lbl {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.billing-val { font-size: 16px; font-weight: 700; }
+.billing-card.peak { border-color: rgba(251, 146, 60, 0.45); }
+.billing-card.peak .billing-val { color: var(--warn); }
+.billing-card.off { border-color: rgba(96, 165, 250, 0.4); }
+.billing-card.off .billing-val { color: var(--accent); }
+.billing-card.save .billing-val { color: var(--ok); }
+.billing-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 132px;
+  padding: 4px 2px 0;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+.bars-days { min-width: 100%; }
+.bar-col {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  height: 100%;
+}
+.bar {
+  width: 100%;
+  max-width: 22px;
+  border-radius: 3px 3px 0 0;
+  background: linear-gradient(180deg, var(--accent), rgba(59, 130, 246, 0.35));
+  transition: height 0.2s;
+}
+.bar.peak { background: linear-gradient(180deg, var(--warn), rgba(251, 146, 60, 0.35)); }
+.bar-x {
+  font-size: 9px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  transform: rotate(-35deg);
+  transform-origin: top center;
+}
+.bars-hours { gap: 2px; }
+.bars-hours .bar-x { transform: none; font-size: 9px; }
+
+.week-heat { margin-top: 4px; }
+.wh-labels {
+  display: grid;
+  grid-template-columns: 28px repeat(24, 1fr);
+  gap: 2px;
+  font-size: 9px;
+  color: var(--text-faint);
+  margin-bottom: 3px;
+}
+.wh-row {
+  display: grid;
+  grid-template-columns: 28px repeat(24, 1fr);
+  gap: 2px;
+  margin-bottom: 2px;
+  align-items: center;
+}
+.wh-wlabel {
+  font-size: 10px;
+  color: var(--text-faint);
+  text-align: right;
+  padding-right: 6px;
+}
+.wh-wlabel.wk { color: var(--accent); font-weight: 700; }
+.wh-hlabel { text-align: center; }
+.wh-cell {
+  height: 16px;
+  border-radius: 3px;
+  background: var(--border);
+}
+.wh-cell.l1 { background: rgba(59, 130, 246, 0.25); }
+.wh-cell.l2 { background: rgba(59, 130, 246, 0.5); }
+.wh-cell.l3 { background: rgba(59, 130, 246, 0.75); }
+.wh-cell.l4 { background: #2563eb; box-shadow: 0 0 4px rgba(37, 99, 235, 0.5); }
+.wh-cell.peak { outline: 1.5px solid rgba(251, 146, 60, 0.85); outline-offset: -1px; }
+.wh-cell.wk { background: rgba(96, 165, 250, 0.14); }
+.wh-legend-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.slot-editor {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--well-2);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.slot-label { font-size: 12px; color: var(--text-dim); }
+.slot-list { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.slot-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.slot-row input {
+  width: 52px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--well);
+  color: var(--text);
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+  text-align: center;
+}
+.slot-row input:focus { border-color: var(--accent); }
+.slot-row > span { color: var(--text-faint); font-size: 11px; }
+.btn-xs { padding: 3px 8px; font-size: 11.5px; }
+.slot-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  margin-left: auto;
+}
+.pricing-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.pricing-actions .hint { font-size: 11.5px; }
+
 /* ---------- 致命错误弹窗 ---------- */
 
 .modal-overlay {

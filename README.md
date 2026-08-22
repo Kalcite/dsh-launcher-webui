@@ -227,6 +227,23 @@ tools\plugin.cmd enable <bundle>
 
 ## 更新日志
 
+### v0.6.0 — 用量分析（Token 消耗图 + 峰谷计费账单）
+
+- **新增「用量分析」页**：Token 消耗可视化与峰谷计费
+  - **Token 构成饼图**（conic-gradient）：缓存命中输入 / 输入(未命中) / 输出 / 缓存写入，悬浮与图例显示数量、占比、单价
+  - **峰谷账单**：按「星期×小时」聚合（168 桶）实时计费——高峰费用 / 空闲费用 / 相对全高峰节省 / 高峰 token 占比；**单价、峰谷时段、空闲倍率、周末规则修改后账单立即重算**
+  - **30 天消耗柱状图**（输入+输出）+ **24 小时消耗分布**（高峰时段橙色高亮，悬浮显示各类 tokens）
+  - **星期 × 小时消耗热力**（168 格，峰值格子描边，周末行标注空闲价）
+  - **GitHub 风格热力图**（近 365 天，按日用量分级着色，悬浮显示日期/tokens/费用）
+  - 统计卡：总费用 / 输入 / 输出 / 缓存读取 / 会话数 / 活跃天数
+  - 最近 30 天明细表 + 会话明细（项目/模型/输入/输出/费用）
+- **峰谷计价默认值取自 DeepSeek 官方定价文档**（[api-docs.deepseek.com/zh-cn/quick_start/pricing](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)）：
+  - 高峰时段 9:00-12:00 / 14:00-18:00（北京时间）；空闲 = 高峰 × 0.5；周末（周六/日）全天按空闲价（2026-08-23 起）
+  - deepseek-v4-flash 高峰价：输入 ¥3 / 输出 ¥9 / 缓存命中 ¥0.1 / 缓存写入 ¥3（元/百万 token）
+  - 全部可在页面修改并持久化到 config.json（`POST /api/usage/pricing`）
+- 数据源：`DSH_HOME/sessions/**/session.jsonl.zstd`（zstd 多帧解压，移植 dsh 帧扫描；Node `node:zlib` 零依赖）
+- 新 API：`GET /api/usage`（新增 `byHourWeek` 168 桶聚合）、`POST /api/usage/pricing`
+
 ### v0.5.2 — 修复会话备份 cpSync 未定义
 
 - **修复会话备份失败**（"cpSync is not defined"）：`server/index.mjs` 的 `node:fs` 导入缺失 `cpSync`/`rmSync`，导致备份与删除备份报错；已补全导入并实测（真实会话文件备份 files/size 正确、删除记录正常）
