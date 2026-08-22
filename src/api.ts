@@ -17,6 +17,8 @@ export type EnvInfo = {
   pnpm: string;
   git: string;
   portableNode: string | null;
+  launcherVersion: string | null;
+  launcherCommit: string | null;
   dshRoot: string;
   dshHome: string | null;
   webPort: number;
@@ -52,6 +54,36 @@ export type UpdateCheck = {
   current: { pkgVersion: string | null; branch: string | null; commit: string | null; tag: string | null };
   clientBundles: { total: number; missing: { name: string; path: string }[] };
   releases: ReleaseInfo[];
+  error: string | null;
+};
+
+export type PluginItem = {
+  name: string;
+  enabled: boolean;
+  builtin?: boolean;
+  dir?: string;
+};
+
+export type SpecialPlugin = {
+  key: string;
+  name: string;
+  url: string;
+  description: string;
+  needsFix: boolean;
+  fixNote: string;
+};
+
+export type PluginOverview = {
+  profile: string;
+  profileDir: string;
+  installed: PluginItem[];
+  external: PluginItem[];
+  special: SpecialPlugin[];
+};
+
+export type PluginSearchResult = {
+  npm: { name: string; version: string; description: string }[];
+  special: SpecialPlugin[];
   error: string | null;
 };
 
@@ -111,7 +143,28 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
-    }).then((r) => j<{ ok: boolean; dshRoot?: string; dshHome?: string | null }>(r))
+    }).then((r) => j<{ ok: boolean; dshRoot?: string; dshHome?: string | null }>(r)),
+  plugins: () => fetch("/api/plugins").then((r) => j<PluginOverview>(r)),
+  pluginSearch: (q: string) =>
+    fetch(`/api/plugins/search?q=${encodeURIComponent(q)}`).then((r) => j<PluginSearchResult>(r)),
+  pluginInstall: (body: { source?: "npm" | "routing-suite"; pkg?: string }) =>
+    fetch("/api/plugins/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then((r) => j<{ ok: boolean; started?: boolean; error?: string }>(r)),
+  pluginToggle: (bundle: string, disabled: boolean) =>
+    fetch("/api/plugins/toggle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bundle, disabled })
+    }).then((r) => j<{ ok: boolean; started?: boolean; error?: string }>(r)),
+  pluginRemove: (pkg: string) =>
+    fetch("/api/plugins/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pkg })
+    }).then((r) => j<{ ok: boolean; started?: boolean; error?: string }>(r))
 };
 
 /** SSE 连接（自动重连由 EventSource 内置处理），返回关闭函数 */

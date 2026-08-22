@@ -6,6 +6,7 @@ import { ServerCard } from "./components/ServerCard";
 import { EnvCard } from "./components/EnvCard";
 import { DeployCard } from "./components/DeployCard";
 import { UpdateCard } from "./components/UpdateCard";
+import { PluginCard } from "./components/PluginCard";
 import { LogsPanel } from "./components/LogsPanel";
 
 export default function App() {
@@ -85,8 +86,10 @@ export default function App() {
               {page === "overview"
                 ? "dsh 开发环境多功能控制台"
                 : page === "deploy"
-                  ? "dsh 独立目录 · 一键部署"
-                  : "dsh 更新 · 检查 Releases 与版本升级"}
+                  ? "dsh 独立目录 · 部署/切换/管理"
+                  : page === "plugins"
+                    ? "已安装插件 · npm 搜索 · 特殊插件"
+                    : "dsh 更新 · 检查 Releases 与版本升级"}
               <span className="badge-mvp">MVP</span>
             </p>
           </div>
@@ -109,6 +112,8 @@ export default function App() {
           </section>
         ) : page === "deploy" ? (
           <DeployCard env={env} busy={busy} setBusy={setBusy} deployResult={deployResult} />
+        ) : page === "plugins" ? (
+          <PluginCard busy={busy} setBusy={setBusy} deployResult={deployResult} />
         ) : (
           <UpdateCard busy={busy} setBusy={setBusy} deployResult={deployResult} />
         )}

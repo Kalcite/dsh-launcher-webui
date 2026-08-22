@@ -1,7 +1,7 @@
-import { Github, LayoutDashboard, Rocket, RefreshCw, ListTodo, Puzzle, Command, Zap } from "lucide-react";
+import { Github, LayoutDashboard, Rocket, RefreshCw, Puzzle, Command, Zap } from "lucide-react";
 import type { EnvInfo } from "../api";
 
-export type Page = "overview" | "deploy" | "update";
+export type Page = "overview" | "deploy" | "update" | "plugins";
 
 type NavItem = {
   icon: React.ComponentType<{ size?: number | string; strokeWidth?: number | string }>;
@@ -12,10 +12,9 @@ type NavItem = {
 
 const NAV: NavItem[] = [
   { icon: LayoutDashboard, label: "概览", page: "overview" },
-  { icon: Rocket, label: "部署 dsh", page: "deploy" },
+  { icon: Rocket, label: "管理 dsh", page: "deploy" },
+  { icon: Puzzle, label: "插件管理", page: "plugins" },
   { icon: RefreshCw, label: "更新 dsh", page: "update" },
-  { icon: ListTodo, label: "任务运行器", soon: true },
-  { icon: Puzzle, label: "插件管理", soon: true },
   { icon: Command, label: "自定义命令", soon: true }
 ];
 
@@ -61,6 +60,10 @@ export function Sidebar({
       </nav>
 
       <div className="sidebar-bottom">
+        <div className="version-bar" title={`dsh-launcher v${env?.launcherVersion ?? "?"}${env?.launcherCommit ? ` · commit ${env.launcherCommit}` : ""}`}>
+          <span className="v-name">dsh-launcher</span>
+          <code className="v-meta">v{env?.launcherVersion ?? "?"}{env?.launcherCommit ? ` · ${env.launcherCommit}` : ""}</code>
+        </div>
         {env && (
           <div className="mini-env">
             <div className="mini-row">

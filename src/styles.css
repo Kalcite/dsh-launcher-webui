@@ -132,6 +132,26 @@ body {
   flex-direction: column;
   gap: 12px;
 }
+.version-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, rgba(77, 107, 254, 0.12), rgba(124, 92, 255, 0.05));
+}
+.version-bar .v-name {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dim);
+  letter-spacing: 0.4px;
+}
+.version-bar .v-meta {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: #b7c3ff;
+}
 .mini-env {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -405,6 +425,74 @@ body {
   color: var(--ok);
   font-weight: 600;
 }
+
+/* ---------- 插件管理页 ---------- */
+
+.plugin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.prow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(5, 8, 13, 0.4);
+}
+.prow.disabled { opacity: 0.55; }
+.prow:hover { border-color: var(--border-strong); }
+.pstatus {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.pstatus.on { background: var(--ok); box-shadow: 0 0 8px rgba(52, 211, 153, 0.7); }
+.pstatus.off { background: var(--idle); }
+.pinfo {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pname { font-size: 12.5px; font-weight: 700; color: var(--text); word-break: break-all; }
+.pver { font-size: 11px; color: var(--text-faint); }
+.pdesc {
+  width: 100%;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pbadge {
+  font-style: normal;
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.pbadge.builtin { color: var(--idle); background: rgba(100, 116, 139, 0.15); border: 1px solid rgba(100, 116, 139, 0.35); }
+.pbadge.external { color: var(--accent); background: rgba(77, 107, 254, 0.12); border: 1px solid rgba(77, 107, 254, 0.35); }
+.pbadge.user { color: var(--ok); background: rgba(52, 211, 153, 0.12); border: 1px solid rgba(52, 211, 153, 0.35); }
+.pbadge.fix { color: var(--warn); background: rgba(251, 191, 36, 0.12); border: 1px solid rgba(251, 191, 36, 0.35); }
+.pops { display: flex; gap: 8px; flex-shrink: 0; }
+.search-list { max-height: 320px; overflow-y: auto; padding-right: 4px; }
+.special-card {
+  padding: 12px 14px;
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: var(--radius-sm);
+  background: rgba(251, 191, 36, 0.05);
+}
+.special-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.special-head .github-link { margin-left: auto; }
+.special-desc { margin: 8px 0 0; font-size: 12px; color: var(--text-dim); }
 
 /* ---------- 日志 ---------- */
 

@@ -26,6 +26,7 @@ import { mkdir, readdir, rename, rmdir } from "node:fs/promises";
 import path from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import * as plugins from "./plugins.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LAUNCHER_ROOT = path.resolve(__dirname, "..");
@@ -102,6 +103,15 @@ function expandTilde(p) {
 }
 
 const cfg = loadConfig();
+
+// 插件管理模块的上下文（传入本后端内部函数）
+const pluginCtx = {
+  cfg,
+  LAUNCHER_ROOT,
+  pushLog,
+  runStream,
+  kitNodeExe
+};
 
 /* ------------------------------ 状态 ------------------------------ */
 
@@ -554,12 +564,18 @@ function persistConfig() {
 async function envInfo() {
   const now = Date.now();
   if (state.envCache && now - state.envCacheAt < 8000) return state.envCache;
-  const [node, pnpm, git] = await Promise.all([
+  const [node, pnpm, git, lc] = await Promise.all([
     run(process.execPath, ["--version"]),
     // Windows 上 pnpm 是 .ps1/.cmd shim，execFile 无法直接执行 → 用 cmd /c 包装
     run("cmd", ["/c", "pnpm --version"]),
-    run("git", ["--version"])
+    run("git", ["--version"]),
+    // 启动器自身版本与提交号（左下角信息栏）
+    run("git", ["-C", LAUNCHER_ROOT, "rev-parse", "--short", "HEAD"])
   ]);
+  let launcherVersion = "?";
+  try {
+    launcherVersion = JSON.parse(readFileSync(path.join(LAUNCHER_ROOT, "package.json"), "utf8")).version;
+  } catch { /* 缺失时保持 ? */ }
   let portableNode = null;
   // 优先套件自带的便携 Node，其次 dsh 部署目录的便携 Node
   for (const exe of [KIT_NODE_EXE, path.join(cfg.dshRoot, ".runtime", "node", "node.exe")]) {
@@ -573,6 +589,8 @@ async function envInfo() {
     pnpm: pnpm.out || "?",
     git: git.out || "?",
     portableNode,
+    launcherVersion,
+    launcherCommit: lc.ok ? lc.out : null,
     dshRoot: cfg.dshRoot,
     dshHome: cfg.dshHome, // null = 默认 ~/.dsh
     webPort: cfg.webPort,
@@ -891,6 +909,44 @@ const server = http.createServer(async (req, res) => {
       });
       // 取消选择（DialogResult.Cancel）不是错误：out 为空 → path null
       return sendJson(res, { ok: r.ok, path: r.out || null, error: r.ok ? undefined : (r.out || "文件夹选择失败") });
+    }
+
+    // ── 插件管理 ──
+    if (req.method === "GET" && p === "/api/plugins") {
+      return sendJson(res, plugins.overview(pluginCtx));
+    }
+    if (req.method === "GET" && p === "/api/plugins/search") {
+      const q = url.searchParams.get("q") ?? "";
+      return sendJson(res, await plugins.search(pluginCtx, q));
+    }
+    const runPluginTask = (task, okExtra = {}) => {
+      task
+        .then((r) => broadcast({ type: "deploy", action: "plugin", ...r, ...okExtra }))
+        .catch((e) => broadcast({ type: "deploy", action: "plugin", ok: false, error: String(e?.message ?? e) }));
+    };
+    if (req.method === "POST" && p === "/api/plugins/install") {
+      const body = await readBody(req);
+      const source = body?.source ?? "npm";
+      if (source === "routing-suite") {
+        runPluginTask(plugins.installRoutingSuite(pluginCtx));
+      } else if (body?.pkg) {
+        runPluginTask(plugins.installNpm(pluginCtx, String(body.pkg)));
+      } else {
+        return sendJson(res, { ok: false, error: "缺少 pkg 参数" }, 400);
+      }
+      return sendJson(res, { ok: true, started: true });
+    }
+    if (req.method === "POST" && p === "/api/plugins/toggle") {
+      const body = await readBody(req);
+      if (!body?.bundle) return sendJson(res, { ok: false, error: "缺少 bundle 参数" }, 400);
+      runPluginTask(plugins.toggle(pluginCtx, String(body.bundle), !!body.disabled));
+      return sendJson(res, { ok: true, started: true });
+    }
+    if (req.method === "POST" && p === "/api/plugins/remove") {
+      const body = await readBody(req);
+      if (!body?.pkg) return sendJson(res, { ok: false, error: "缺少 pkg 参数" }, 400);
+      runPluginTask(plugins.removeNpm(pluginCtx, String(body.pkg)));
+      return sendJson(res, { ok: true, started: true });
     }
 
     return serveStatic(req, res, url);

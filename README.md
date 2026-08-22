@@ -35,7 +35,8 @@ J:\dsh-launcher\                 ← 套件根（运行时约 172MB，可整体�
 | 页面 | 功能 |
 |---|---|
 | **概览** | 服务器启停/重启 + HTTP 探活 + PID/日志大小；环境信息（node/pnpm/git/便携 Node/dshRoot）；数据目录 DSH_HOME 配置（支持**文件夹选择器**）；一键打开 Web UI / 仓库目录 / VSCode；实时日志面板（过滤/跟随/清空视图） |
-| **部署 dsh** | 一键部署到任意目录（clone + install + build，SSE 进度）；目录状态检查（**支持文件夹选择器**，选完自动检查）；切换 dshRoot（不部署仅切换） |
+| **管理 dsh** | dsh 本体目录部署/切换/检查（一键部署 clone+install+build、**文件夹选择器**、切换 dshRoot） |
+| **插件管理** | 已安装插件（含本体自带，本体不可修改）+ 禁用/启用/卸载；npm @deepseek-ai 搜索安装；特殊插件 dsh-routing-suite（注入器 + 路由预设，自动二次修复） |
 | **更新 dsh** | 检查更新（GitHub Releases 同步更新内容）；版本选择升级（默认最新）；客户端 bundle 健康检测与一键修复 |
 
 ## 快速开始
@@ -56,6 +57,18 @@ VSCode 轻度开发：`code J:\dsh-launcher`，然后 `pnpm dev`（Vite HMR 5178
 3. 部署完成自动把 `dshRoot` 切换到新目录，点「启动」即用新版本
 
 已有目录可**检查状态**（git 分支/提交/版本/依赖/构建产物/部署就绪）或**切换到此目录**（不部署，仅切换 dshRoot）。
+
+## 插件管理（「插件管理」页）
+
+- **已安装插件**：列出 profile 已装 bundle 与本体自带插件（`dsh.profile.bundles` + `cordis.patch.yml` 禁用标记）
+  - **本体自带**（dsh 仓库 workspace 提供，如 `@deepseek-ai/dsh-base`）标记"本体自带 · 不可修改"，禁用/卸载被后端拒绝
+  - 用户安装插件支持**禁用 / 启用 / 卸载**（禁用 = 编辑 `cordis.patch.yml`，重启生效；卸载 = `dsh plugin remove`）
+- **搜索安装**：关键词搜索 npm `@deepseek-ai/` 系列插件（npm registry search），一键 `dsh plugin add` 安装
+  - 自动处理 pnpm 构建脚本拦截：写入 profile `pnpm-workspace.yaml` 的 `allowBuilds`（node-pty/esbuild）并失败重试
+- **特殊插件**：dsh-routing-suite（[GitHub](https://github.com/yjh051108/dsh-routing-suite)）
+  - 组成：`dsh-super-injector`（运行时注入器，dev_* 工具）+ `dsh-router-standard`（思维模式路由预设 Router Standard/Spec）
+  - 安装流程自动完成**二次修复**：Release 预构建注入器下载（免构建）→ 装配进 profile bundles → 克隆套件（含子模块）→ 预设平铺复制到 `.agent-presets\`（DSH 只扫一级目录）→ `preset.yml` 描述引号修复
+  - 完成后重启 dsh，新会话可选 Router Standard / Router Spec
 
 ## 更新 dsh（「更新 dsh」页）
 
@@ -185,6 +198,15 @@ tools\plugin.cmd enable <bundle>
 | 更新后插件不生效 | 插件在 `~\.dsh\profiles\web`（用户层），与仓库版本独立；`tools\plugin.cmd` 管理 |
 
 ## 更新日志
+
+### v0.4.0 — 插件管理
+
+- **新增「插件管理」页**：列出已安装插件与本体自带插件（本体不可修改，后端强制保护）；禁用/启用（cordis.patch.yml）/卸载（dsh plugin remove）
+- **npm 搜索安装**：关键词搜索 `@deepseek-ai/` 系列插件并一键安装；自动处理 pnpm 构建脚本拦截（allowBuilds + 重试）
+- **特殊插件 dsh-routing-suite**：注入器 + 思维模式路由预设一键安装，内置二次修复（预构建注入器、子模块、预设平铺、YAML 引号修复）
+- 「部署 dsh」更名「**管理 dsh**」
+- 新 API：`GET /api/plugins`、`GET /api/plugins/search`、`POST /api/plugins/install|toggle|remove`
+- 插件管理全程操作**当前 DSH_HOME**（隔离调试：测试 dsh 本体 + 测试 DSH_HOME）
 
 ### v0.3.2 — 目录选择器与检查稳定性
 
