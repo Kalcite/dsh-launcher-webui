@@ -227,6 +227,10 @@ tools\plugin.cmd enable <bundle>
 
 ## 更新日志
 
+### v0.5.2 — 修复会话备份 cpSync 未定义
+
+- **修复会话备份失败**（"cpSync is not defined"）：`server/index.mjs` 的 `node:fs` 导入缺失 `cpSync`/`rmSync`，导致备份与删除备份报错；已补全导入并实测（真实会话文件备份 files/size 正确、删除记录正常）
+
 ### v0.5.1 — 启动逻辑脚本化（修复 launcher.cmd 闪退）
 
 - **修复 launcher.cmd 闪退**（"... was unexpected at this time"）：`.update-pending` 收尾段的 cmd 括号块变量预展开崩溃

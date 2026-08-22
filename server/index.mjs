@@ -21,7 +21,9 @@ import {
   readFileSync,
   readdirSync,
   writeFileSync,
-  mkdirSync
+  mkdirSync,
+  cpSync,
+  rmSync
 } from "node:fs";
 import { mkdir, readdir, rename, rmdir } from "node:fs/promises";
 import path from "node:path";
