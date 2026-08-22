@@ -174,7 +174,8 @@ export async function usageOverview(cfg) {
     try {
       const text = await decompressSessionLog(readFileSync(file));
       let sessionInput = 0, sessionOutput = 0, sessionCacheRead = 0, sessionCacheWrite = 0;
-      let lastTs = null;
+      let firstTs = null, lastTs = null, events = 0;
+      const sessionHourWeek = Array.from({ length: 168 }, () => ({ weekday: 0, hour: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }));
       const models = new Set();
       for (const line of text.split(/\r?\n/)) {
         if (!line.trim()) continue;
@@ -182,10 +183,12 @@ export async function usageOverview(cfg) {
         if (m) models.add(m);
         const u = parseUsageLine(line);
         if (!u) continue;
+        events++;
         input += u.input; output += u.output; cacheRead += u.cacheRead; cacheWrite += u.cacheWrite;
         sessionInput += u.input; sessionOutput += u.output; sessionCacheRead += u.cacheRead; sessionCacheWrite += u.cacheWrite;
         if (u.ts) {
-          lastTs = u.ts;
+          if (firstTs === null || u.ts < firstTs) firstTs = u.ts;
+          if (lastTs === null || u.ts > lastTs) lastTs = u.ts;
           const dt = new Date(u.ts);
           const key = dayKey(u.ts);
           const d = byDay.get(key) ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -197,6 +200,9 @@ export async function usageOverview(cfg) {
           const hw = byHourWeek[dt.getDay() * 24 + h];
           hw.weekday = dt.getDay(); hw.hour = h;
           hw.input += u.input; hw.output += u.output; hw.cacheRead += u.cacheRead; hw.cacheWrite += u.cacheWrite;
+          const shw = sessionHourWeek[dt.getDay() * 24 + h];
+          shw.weekday = dt.getDay(); shw.hour = h;
+          shw.input += u.input; shw.output += u.output; shw.cacheRead += u.cacheRead; shw.cacheWrite += u.cacheWrite;
         }
       }
       if (sessionInput || sessionOutput) {
@@ -209,7 +215,10 @@ export async function usageOverview(cfg) {
           output: sessionOutput,
           cacheRead: sessionCacheRead,
           cacheWrite: sessionCacheWrite,
+          events,
+          firstTs,
           updatedAt: lastTs,
+          hourWeek: sessionHourWeek.filter((b) => b.input || b.output || b.cacheRead || b.cacheWrite),
           cost: costOf({ input: sessionInput, output: sessionOutput, cacheRead: sessionCacheRead, cacheWrite: sessionCacheWrite })
         });
       }

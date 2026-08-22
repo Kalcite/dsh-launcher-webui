@@ -23,6 +23,17 @@ function fmtPct(n: number): string {
   return (n * 100).toFixed(1) + "%";
 }
 
+function fmtDuration(ms: number): string {
+  const m = Math.floor(ms / 60000);
+  if (m < 60) return `${m} 分钟`;
+  return `${Math.floor(m / 60)} 小时 ${m % 60} 分`;
+}
+
+function fmtTime(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
 /* ------------------------------ 峰谷计费（前端实时计算） ------------------------------ */
 
 function inPeakSlot(hour: number, pricing: UsagePricing): boolean {
@@ -54,15 +65,16 @@ const PIE_COLORS = {
   cacheWrite: "var(--err)"
 };
 
-/** Token 构成饼图（conic-gradient） */
-function TokenPie({ data, pricing }: { data: UsageData; pricing: UsagePricing }) {
-  const t = data.totals;
+/** Token 构成饼图（conic-gradient），通用：可传总量或单会话 */
+function CompositionPie({ input, output, cacheRead, cacheWrite, pricing }: {
+  input: number; output: number; cacheRead: number; cacheWrite: number; pricing: UsagePricing;
+}) {
   const segs = useMemo(() => {
     const items = [
-      { key: "cacheRead", label: "缓存命中输入", v: t.cacheRead },
-      { key: "input", label: "输入（缓存未命中）", v: t.input },
-      { key: "output", label: "输出", v: t.output },
-      { key: "cacheWrite", label: "缓存写入", v: t.cacheWrite }
+      { key: "cacheRead", label: "缓存命中输入", v: cacheRead },
+      { key: "input", label: "输入（缓存未命中）", v: input },
+      { key: "output", label: "输出", v: output },
+      { key: "cacheWrite", label: "缓存写入", v: cacheWrite }
     ];
     const total = items.reduce((s, i) => s + i.v, 0) || 1;
     let acc = 0;
@@ -75,7 +87,7 @@ function TokenPie({ data, pricing }: { data: UsageData; pricing: UsagePricing })
       return { ...i, start, end, pct: i.v / total, price: priceOf(i.key) };
     });
     return { out, total };
-  }, [t, pricing]);
+  }, [input, output, cacheRead, cacheWrite, pricing]);
 
   if (!segs.total) {
     return <div className="pie-empty">暂无数据</div>;
@@ -262,6 +274,71 @@ function Heatmap({ byDay }: { byDay: UsageData["byDay"] }) {
   );
 }
 
+/* ------------------------------ 会话级分析 ------------------------------ */
+
+type SessionRow = UsageData["bySession"][number];
+
+/** 会话实时费用（按峰谷，hourWeek 为空时回退后端高峰价估算） */
+function sessionCost(s: SessionRow, pricing: UsagePricing): number {
+  if (!s.hourWeek?.length) return s.cost ?? 0;
+  return s.hourWeek.reduce((sum, b) => sum + bucketCost(b, pricing), 0);
+}
+
+/** 单个会话详情：构成饼图 + 峰谷账单 + 24h 分布 + 元信息 */
+function SessionDetail({ s, pricing }: { s: SessionRow; pricing: UsagePricing }) {
+  const bill = useMemo(() => {
+    let total = 0, peak = 0, offPeak = 0, allPeak = 0;
+    for (const b of s.hourWeek ?? []) {
+      const c = bucketCost(b, pricing);
+      total += c;
+      allPeak += (b.input * pricing.inputPerM + b.output * pricing.outputPerM +
+        b.cacheRead * pricing.cacheReadPerM + b.cacheWrite * pricing.cacheWritePerM) / 1e6;
+      if (isPeakBucket(b, pricing)) peak += c; else offPeak += c;
+    }
+    return { total, peak, offPeak, savings: allPeak - total };
+  }, [s, pricing]);
+
+  const hourAgg = useMemo(() => {
+    const out = Array.from({ length: 24 }, (_, hour) => ({ hour, total: 0 }));
+    for (const b of s.hourWeek ?? []) out[b.hour].total += bucketTokens(b);
+    return out;
+  }, [s]);
+  const max = Math.max(1, ...hourAgg.map((h) => h.total));
+
+  const start = s.firstTs ? new Date(s.firstTs) : null;
+  const end = s.updatedAt ? new Date(s.updatedAt) : null;
+  const dur = start && end ? Math.max(0, end.getTime() - start.getTime()) : null;
+
+  return (
+    <div className="session-detail">
+      <div className="sd-grid">
+        <CompositionPie input={s.input} output={s.output} cacheRead={s.cacheRead} cacheWrite={s.cacheWrite} pricing={pricing} />
+        <div className="sd-right">
+          <div className="billing-grid">
+            <div className="billing-card peak"><span className="billing-lbl"><Clock size={12} /> 高峰费用</span><span className="billing-val">{fmtCost(bill.peak)}</span></div>
+            <div className="billing-card off"><span className="billing-lbl"><MoonStar size={12} /> 空闲费用</span><span className="billing-val">{fmtCost(bill.offPeak)}</span></div>
+            <div className="billing-card save"><span className="billing-lbl">合计（峰谷）</span><span className="billing-val">{fmtCost(bill.total)}</span></div>
+            <div className="billing-card"><span className="billing-lbl">相对全高峰节省</span><span className="billing-val">{fmtCost(Math.max(0, bill.savings))}</span></div>
+          </div>
+          <div className="sd-meta">
+            <span>模型：{s.models.join(", ") || "—"}</span>
+            <span>时长：{dur ? fmtDuration(dur) : "—"}</span>
+            <span>时间：{start ? `${fmtTime(start.getTime())} → ${end ? fmtTime(end.getTime()) : "…"}` : "—"}</span>
+            <span>usage 事件：{s.events ?? 0} 次</span>
+          </div>
+        </div>
+      </div>
+      <div className="bars bars-hours sd-bars">
+        {hourAgg.map((h) => (
+          <div key={h.hour} className="bar-col" title={`${String(h.hour).padStart(2, "0")}:00${inPeakSlot(h.hour, pricing) ? " · 高峰" : " · 空闲"} · ${fmtTok(h.total)}`}>
+            <div className={`bar ${inPeakSlot(h.hour, pricing) ? "peak" : ""}`} style={{ height: h.total > 0 ? Math.max(3, (h.total / max) * 100) : 1 }} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------------ 页面 ------------------------------ */
 
 export function UsageCard() {
@@ -274,6 +351,13 @@ export function UsageCard() {
     peakSlots: [{ start: 9, end: 12 }, { start: 14, end: 18 }],
     weekendFlat: true
   });
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggleSession = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -366,7 +450,7 @@ export function UsageCard() {
       <div className="usage-cols">
         <div className="usage-col">
           <h3 className="section-title"><PieChart size={14} /> Token 构成</h3>
-          {data ? <TokenPie data={data} pricing={pricing} /> : <p className="hint">加载中…</p>}
+          {data ? <CompositionPie input={data.totals.input} output={data.totals.output} cacheRead={data.totals.cacheRead} cacheWrite={data.totals.cacheWrite} pricing={pricing} /> : <p className="hint">加载中…</p>}
         </div>
         <div className="usage-col">
           <h3 className="section-title"><TrendingUp size={14} /> 峰谷账单（随单价实时计算）</h3>
@@ -513,18 +597,46 @@ export function UsageCard() {
       </div>
 
       {/* 按会话 */}
-      <h3 className="section-title" style={{ marginTop: 16 }}>会话明细</h3>
+      <h3 className="section-title" style={{ marginTop: 16 }}>会话分析（点「分析」查看单会话详情）</h3>
+      {data && data.bySession.length > 0 && (
+        <div className="session-compare">
+          {data.bySession.map((s) => {
+            const c = sessionCost(s, pricing);
+            const maxC = Math.max(0.01, ...data.bySession.map((x) => sessionCost(x, pricing)));
+            return (
+              <div key={s.id} className="sc-row" title={`${s.project} · ${s.id.slice(0, 8)} · 实时费用 ${fmtCost(c)}`}>
+                <span className="sc-lbl">{s.project} · {s.id.slice(0, 8)}</span>
+                <div className="sc-track"><div className={`sc-bar${c > maxC * 0.6 ? " hot" : ""}`} style={{ width: `${Math.max(1.5, (c / maxC) * 100)}%` }} /></div>
+                <span className="sc-val">{fmtCost(c)}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
       <div className="usage-table">
-        <div className="ut-head"><span>项目 / 会话</span><span>模型</span><span>输入</span><span>输出</span><span>费用</span></div>
-        {data?.bySession.map((s) => (
-          <div key={s.id} className="ut-row">
-            <span title={s.id}>{s.project} · {s.id.slice(0, 8)}</span>
-            <span>{s.models.join(", ") || "—"}</span>
-            <span>{fmtTok(s.input)}</span>
-            <span>{fmtTok(s.output)}</span>
-            <span className={s.cost > 5 ? "warn" : ""}>{fmtCost(s.cost)}</span>
-          </div>
-        ))}
+        <div className="ut-head ut-head-session"><span>项目 / 会话</span><span>模型</span><span>输入</span><span>输出</span><span>缓存读</span><span>费用（峰谷）</span><span /></div>
+        {data?.bySession.map((s) => {
+          const open = expanded.has(s.id);
+          const c = sessionCost(s, pricing);
+          return (
+            <div key={s.id}>
+              <div className="ut-row ut-row-session">
+                <span title={s.id}>{s.project} · {s.id.slice(0, 8)}</span>
+                <span>{s.models.join(", ") || "—"}</span>
+                <span>{fmtTok(s.input)}</span>
+                <span>{fmtTok(s.output)}</span>
+                <span>{fmtTok(s.cacheRead)}</span>
+                <span className={c > 5 ? "warn" : ""}>{fmtCost(c)}</span>
+                <span>
+                  <button className="btn btn-ghost btn-xs" onClick={() => toggleSession(s.id)}>
+                    {open ? "收起" : "分析"}
+                  </button>
+                </span>
+              </div>
+              {open && <SessionDetail s={s} pricing={pricing} />}
+            </div>
+          );
+        })}
       </div>
 
       {error && <div className="error-banner"><span><Flame size={13} /> {error}</span></div>}

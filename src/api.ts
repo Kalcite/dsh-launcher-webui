@@ -238,7 +238,7 @@ export const api = {
       byDay: { date: string; input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }[];
       byHour: { hour: number; input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }[];
       byHourWeek: { weekday: number; hour: number; input: number; output: number; cacheRead: number; cacheWrite: number }[];
-      bySession: { id: string; project: string; models: string[]; input: number; output: number; cacheRead: number; cacheWrite: number; updatedAt: number | null; cost: number }[];
+      bySession: { id: string; project: string; models: string[]; input: number; output: number; cacheRead: number; cacheWrite: number; events: number; firstTs: number | null; updatedAt: number | null; hourWeek: { weekday: number; hour: number; input: number; output: number; cacheRead: number; cacheWrite: number }[]; cost: number }[];
     }>(r)
   ),
   usagePricing: (body: Partial<UsagePricing>) =>
