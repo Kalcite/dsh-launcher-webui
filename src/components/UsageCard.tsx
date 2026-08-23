@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   BarChart3, RefreshCw, Save, Coins, Flame, PieChart, TrendingUp,
-  Clock, MoonStar, Sun, Plus, Trash2, CalendarDays
+  Clock, MoonStar, Sun, Plus, Trash2, CalendarDays, Cpu, RotateCcw
 } from "lucide-react";
-import { api, type UsagePricing } from "../api";
+import { api, type UsagePricing, type ModelPrice, type DayHourBucket, type SessionRow } from "../api";
 
 type UsageData = Awaited<ReturnType<typeof api.usage>>;
-type Bucket = { weekday: number; hour: number; input: number; output: number; cacheRead: number; cacheWrite: number };
 
 function fmtTok(n: number): string {
   if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
@@ -34,27 +33,67 @@ function fmtTime(ts: number): string {
   return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
-/* ------------------------------ 峰谷计费（前端实时计算） ------------------------------ */
+/* ------------------------------ 峰谷计费（前端实时计算，与后端 usage.mjs 同构） ------------------------------ */
+
+const DEFAULT_PRICING: UsagePricing = {
+  offPeakMultiplier: 0.5,
+  peakSlots: [{ start: 9, end: 12 }, { start: 14, end: 18 }],
+  weekendFlat: true,
+  weekendFlatStart: "2026-08-23",
+  models: {
+    "deepseek-v4-flash": { inputPerM: 3, outputPerM: 9, cacheReadPerM: 0.1, cacheWritePerM: 3 },
+    "deepseek-v4-pro": { inputPerM: 9, outputPerM: 27, cacheReadPerM: 0.3, cacheWritePerM: 9 },
+    "deepseek-v4-flash-vision-exp": { inputPerM: 3, outputPerM: 9, cacheReadPerM: 0.1, cacheWritePerM: 3 },
+    "_default": { inputPerM: 3, outputPerM: 9, cacheReadPerM: 0.1, cacheWritePerM: 3 }
+  }
+};
+
+const MODEL_NAMES: Record<string, string> = {
+  "deepseek-v4-flash": "V4 Flash",
+  "deepseek-v4-pro": "V4 Pro",
+  "deepseek-v4-flash-vision-exp": "V4 Flash Vision",
+  "_default": "默认（其他模型）",
+  unknown: "未知模型"
+};
+
+function modelName(model: string): string {
+  return MODEL_NAMES[model] ?? model;
+}
 
 function inPeakSlot(hour: number, pricing: UsagePricing): boolean {
   return pricing.peakSlots.some((s) => hour >= s.start && hour < s.end);
 }
 
-/** 某 (weekday, hour) 桶是否为高峰价；周末全天空闲（weekendFlat） */
-function isPeakBucket(b: { weekday: number; hour: number }, pricing: UsagePricing): boolean {
-  if (pricing.weekendFlat && (b.weekday === 0 || b.weekday === 6)) return false;
-  return inPeakSlot(b.hour, pricing);
+/** 该日期是否处于「周末全天空闲」生效期 */
+function isWeekendFlatDate(date: string, pricing: UsagePricing): boolean {
+  if (!pricing.weekendFlat) return false;
+  if (!pricing.weekendFlatStart) return true;
+  return date >= pricing.weekendFlatStart;
 }
 
-function bucketCost(b: Bucket, pricing: UsagePricing): number {
-  const mult = isPeakBucket(b, pricing) ? 1 : (pricing.offPeakMultiplier ?? 1);
-  return (
-    ((b.input * pricing.inputPerM + b.output * pricing.outputPerM +
-      b.cacheRead * pricing.cacheReadPerM + b.cacheWrite * pricing.cacheWritePerM) / 1e6) * mult
-  );
+/** (日期, 星期, 小时) 是否按高峰价（2026-08-23 前周末仍分峰谷） */
+function isPeakAt(date: string, weekday: number, hour: number, pricing: UsagePricing): boolean {
+  if ((weekday === 0 || weekday === 6) && isWeekendFlatDate(date, pricing)) return false;
+  return inPeakSlot(hour, pricing);
 }
 
-function bucketTokens(b: Bucket): number {
+function modelPriceOf(model: string, pricing: UsagePricing): ModelPrice {
+  return pricing.models[model] ?? pricing.models._default;
+}
+
+/** 单桶费用（按模型单价 × 峰谷系数） */
+function bucketCost(b: DayHourBucket, pricing: UsagePricing): number {
+  const mult = isPeakAt(b.date, b.weekday, b.hour, pricing) ? 1 : pricing.offPeakMultiplier;
+  let cost = 0;
+  for (const [model, t] of Object.entries(b.models)) {
+    const pr = modelPriceOf(model, pricing);
+    cost += (t.input * pr.inputPerM + t.output * pr.outputPerM +
+      t.cacheRead * pr.cacheReadPerM + t.cacheWrite * pr.cacheWritePerM) / 1e6 * mult;
+  }
+  return cost;
+}
+
+function bucketTokens(b: DayHourBucket): number {
   return b.input + b.output + b.cacheRead + b.cacheWrite;
 }
 
@@ -64,6 +103,8 @@ const PIE_COLORS = {
   output: "var(--ok)",
   cacheWrite: "var(--err)"
 };
+
+const MODEL_COLORS = ["var(--accent)", "var(--accent-2)", "var(--ok)", "var(--warn)", "var(--err)", "#22d3ee"];
 
 /** Token 构成饼图（conic-gradient），通用：可传总量或单会话 */
 function CompositionPie({ input, output, cacheRead, cacheWrite, pricing }: {
@@ -79,7 +120,7 @@ function CompositionPie({ input, output, cacheRead, cacheWrite, pricing }: {
     const total = items.reduce((s, i) => s + i.v, 0) || 1;
     let acc = 0;
     const priceOf = (key: string) =>
-      key === "input" ? pricing.inputPerM : key === "output" ? pricing.outputPerM : key === "cacheRead" ? pricing.cacheReadPerM : pricing.cacheWritePerM;
+      key === "input" ? pricing.models._default.inputPerM : key === "output" ? pricing.models._default.outputPerM : key === "cacheRead" ? pricing.models._default.cacheReadPerM : pricing.models._default.cacheWritePerM;
     const out = items.filter((i) => i.v > 0).map((i) => {
       const start = (acc / total) * 100;
       acc += i.v;
@@ -115,17 +156,45 @@ function CompositionPie({ input, output, cacheRead, cacheWrite, pricing }: {
   );
 }
 
-/** 30 天消耗柱状图（div 柱，tooltip 全量） */
-function DayBars({ byDay }: { byDay: UsageData["byDay"] }) {
-  const days = byDay.slice(-30);
-  const max = useMemo(() => Math.max(1, ...days.map((d) => d.input + d.output)), [days]);
+/** 模型构成：各模型 tokens 与费用（显示在图样里） */
+function ModelBars({ byModel, modelCost }: {
+  byModel: UsageData["byModel"]; modelCost: Map<string, number>;
+}) {
+  const maxTok = Math.max(1, ...byModel.map((m) => m.input + m.output));
+  return (
+    <div className="model-bars">
+      {byModel.map((m, i) => {
+        const cost = modelCost.get(m.model) ?? m.cost ?? 0;
+        const w = Math.max(2, ((m.input + m.output) / maxTok) * 100);
+        return (
+          <div key={m.model} className="mb-row" title={`${modelName(m.model)}\n输入 ${fmtTok(m.input)} · 输出 ${fmtTok(m.output)} · 缓存读 ${fmtTok(m.cacheRead)}\n费用 ${fmtCost(cost)}`}>
+            <span className="mb-name">
+              <span className="mb-dot" style={{ background: MODEL_COLORS[i % MODEL_COLORS.length] }} />
+              {modelName(m.model)}
+            </span>
+            <div className="mb-track"><div className="mb-bar" style={{ width: `${w}%`, background: MODEL_COLORS[i % MODEL_COLORS.length] }} /></div>
+            <span className="mb-tok">{fmtTok(m.input + m.output)}</span>
+            <span className="mb-cost">{fmtCost(cost)}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** 30 天消耗柱状图（div 柱，tooltip 全量；费用为峰谷实时） */
+function DayBars({ days, dayCost }: {
+  days: UsageData["byDay"]; dayCost: Map<string, number>;
+}) {
+  const last30 = days.slice(-30);
+  const max = Math.max(1, ...last30.map((d) => d.input + d.output));
   return (
     <div className="bars bars-days">
-      {days.map((d) => {
+      {last30.map((d) => {
         const v = d.input + d.output;
         const h = v > 0 ? Math.max(3, (v / max) * 120) : 1;
         return (
-          <div key={d.date} className="bar-col" title={`${d.date}\n输入 ${fmtTok(d.input)} · 输出 ${fmtTok(d.output)} · 缓存读 ${fmtTok(d.cacheRead)}\n费用 ${fmtCost(d.cost)}`}>
+          <div key={d.date} className="bar-col" title={`${d.date}\n输入 ${fmtTok(d.input)} · 输出 ${fmtTok(d.output)} · 缓存读 ${fmtTok(d.cacheRead)}\n费用 ${fmtCost(dayCost.get(d.date) ?? d.cost)}`}>
             <div className="bar" style={{ height: h }} />
             <span className="bar-x">{d.date.slice(8)}</span>
           </div>
@@ -135,8 +204,10 @@ function DayBars({ byDay }: { byDay: UsageData["byDay"] }) {
   );
 }
 
-/** 24 小时消耗分布（含高峰时段高亮，来自 byHourWeek 跨周聚合） */
-function HourBars({ hourAgg, pricing }: { hourAgg: { hour: number; total: number; inP: number; outP: number; cr: number; cw: number }[]; pricing: UsagePricing }) {
+/** 24 小时消耗分布（由 byDayHour 聚合，高峰时段高亮） */
+function HourBars({ hourAgg, pricing }: {
+  hourAgg: { hour: number; total: number }[]; pricing: UsagePricing;
+}) {
   const max = Math.max(1, ...hourAgg.map((h) => h.total));
   return (
     <div className="bars bars-hours">
@@ -144,7 +215,7 @@ function HourBars({ hourAgg, pricing }: { hourAgg: { hour: number; total: number
         const peak = inPeakSlot(h.hour, pricing);
         const hh = h.total > 0 ? Math.max(3, (h.total / max) * 120) : 1;
         return (
-          <div key={h.hour} className="bar-col" title={`${String(h.hour).padStart(2, "0")}:00${peak ? " · 高峰" : " · 空闲"}\n总 ${fmtTok(h.total)} · 输入 ${fmtTok(h.inP)} · 输出 ${fmtTok(h.outP)} · 缓存读 ${fmtTok(h.cr)}`}>
+          <div key={h.hour} className="bar-col" title={`${String(h.hour).padStart(2, "0")}:00${peak ? " · 高峰时段" : " · 空闲时段"}\n总 ${fmtTok(h.total)}`}>
             <div className={`bar ${peak ? "peak" : ""}`} style={{ height: hh }} />
             <span className="bar-x">{h.hour % 6 === 0 ? h.hour : ""}</span>
           </div>
@@ -154,51 +225,64 @@ function HourBars({ hourAgg, pricing }: { hourAgg: { hour: number; total: number
   );
 }
 
-/** 星期 × 小时 热力（168 格），周末全天空闲高亮 */
-function WeekHeat({ buckets, pricing }: { buckets: Bucket[]; pricing: UsagePricing }) {
-  const map = useMemo(() => {
-    const m = new Map<number, Bucket>();
-    let max = 1;
+/** 日期 × 小时 消耗热力：按真实日期标注峰谷（2026-08-23 前周末分峰谷，之后周末全天空闲） */
+function DayHourHeatmap({ buckets, pricing }: {
+  buckets: DayHourBucket[]; pricing: UsagePricing;
+}) {
+  const { dates, map, max } = useMemo(() => {
+    const m = new Map<string, DayHourBucket>();
+    let mx = 1;
     for (const b of buckets) {
-      m.set(b.weekday * 24 + b.hour, b);
-      max = Math.max(max, bucketTokens(b));
+      m.set(`${b.date}|${b.hour}`, b);
+      mx = Math.max(mx, bucketTokens(b));
     }
-    return { m, max };
+    const ds = [...new Set(buckets.map((b) => b.date))].sort().slice(-30);
+    return { dates: ds, map: m, max: mx };
   }, [buckets]);
 
-  const rows = [1, 2, 3, 4, 5, 6, 0]; // 周一 → 周日
-  const labels = ["一", "二", "三", "四", "五", "六", "日"];
+  const WK = ["日", "一", "二", "三", "四", "五", "六"];
   return (
     <div className="week-heat">
-      <div className="wh-labels">
+      <div className="wh-labels wh-labels-day">
         <span className="wh-corner" />
         {Array.from({ length: 24 }, (_, h) => (
           <span key={h} className="wh-hlabel">{h % 4 === 0 ? h : ""}</span>
         ))}
       </div>
-      {rows.map((wd, ri) => (
-        <div key={wd} className="wh-row">
-          <span className={`wh-wlabel ${wd === 0 || wd === 6 ? "wk" : ""}`}>{labels[ri]}</span>
-          {Array.from({ length: 24 }, (_, h) => {
-            const b = map.m.get(wd * 24 + h);
-            const v = b ? bucketTokens(b) : 0;
-            const lvl = v > 0 ? Math.min(4, Math.ceil((v / map.max) * 4)) : 0;
-            const peak = isPeakBucket({ weekday: wd, hour: h }, pricing);
-            return (
-              <div
-                key={h}
-                className={`wh-cell l${lvl}${peak ? " peak" : ""}${wd === 0 || wd === 6 ? " wk" : ""}`}
-                title={b ? `周${labels[ri]} ${String(h).padStart(2, "0")}:00${peak ? " · 高峰" : " · 空闲"}\n输入 ${fmtTok(b.input)} · 输出 ${fmtTok(b.output)} · 缓存读 ${fmtTok(b.cacheRead)} · 费用 ${fmtCost(bucketCost(b, pricing))}` : `周${labels[ri]} ${String(h).padStart(2, "0")}:00`}
-              />
-            );
-          })}
-        </div>
-      ))}
+      {dates.map((date) => {
+        const dt = new Date(date + "T00:00:00");
+        const wd = dt.getDay();
+        const isWk = wd === 0 || wd === 6;
+        const flatNow = isWeekendFlatDate(date, pricing);
+        return (
+          <div key={date} className="wh-row">
+            <span className={`wh-wlabel ${isWk ? "wk" : ""}`}>
+              {date.slice(5).replace("-", "/")} 周{WK[wd]}
+            </span>
+            {Array.from({ length: 24 }, (_, h) => {
+              const b = map.get(`${date}|${h}`);
+              const v = b ? bucketTokens(b) : 0;
+              const lvl = v > 0 ? Math.min(4, Math.ceil((v / max) * 4)) : 0;
+              const peak = isPeakAt(date, wd, h, pricing);
+              return (
+                <div
+                  key={h}
+                  className={`wh-cell l${lvl}${peak ? " peak" : ""}${isWk && flatNow ? " wk" : ""}`}
+                  title={b
+                    ? `${date} ${String(h).padStart(2, "0")}:00 · 周${WK[wd]}${peak ? " · 高峰" : " · 空闲"}\n输入 ${fmtTok(b.input)} · 输出 ${fmtTok(b.output)} · 缓存读 ${fmtTok(b.cacheRead)} · 费用 ${fmtCost(bucketCost(b, pricing))}`
+                    : `${date} ${String(h).padStart(2, "0")}:00`}
+                />
+              );
+            })}
+          </div>
+        );
+      })}
       <div className="heatmap-legend">
         <span>少</span>
         {[0, 1, 2, 3, 4].map((l) => <span key={l} className={`wh-cell l${l}`} />)}
         <span>多</span>
-        <span className="wh-legend-note"><Sun size={10} /> 周末全天空闲价</span>
+        <span className="wh-legend-note"><Sun size={10} /> 周末全天空闲（{pricing.weekendFlatStart || "始终"} 起）</span>
+        <span className="wh-legend-note"><Clock size={10} /> 高峰时段描边</span>
       </div>
     </div>
   );
@@ -276,31 +360,32 @@ function Heatmap({ byDay }: { byDay: UsageData["byDay"] }) {
 
 /* ------------------------------ 会话级分析 ------------------------------ */
 
-type SessionRow = UsageData["bySession"][number];
-
-/** 会话实时费用（按峰谷，hourWeek 为空时回退后端高峰价估算） */
+/** 会话实时费用（按 dayHour 峰谷 + 模型；无数据时回退后端估算） */
 function sessionCost(s: SessionRow, pricing: UsagePricing): number {
-  if (!s.hourWeek?.length) return s.cost ?? 0;
-  return s.hourWeek.reduce((sum, b) => sum + bucketCost(b, pricing), 0);
+  if (!s.dayHour?.length) return s.cost ?? 0;
+  return s.dayHour.reduce((sum, b) => sum + bucketCost(b, pricing), 0);
 }
 
 /** 单个会话详情：构成饼图 + 峰谷账单 + 24h 分布 + 元信息 */
 function SessionDetail({ s, pricing }: { s: SessionRow; pricing: UsagePricing }) {
   const bill = useMemo(() => {
     let total = 0, peak = 0, offPeak = 0, allPeak = 0;
-    for (const b of s.hourWeek ?? []) {
+    for (const b of s.dayHour ?? []) {
       const c = bucketCost(b, pricing);
       total += c;
-      allPeak += (b.input * pricing.inputPerM + b.output * pricing.outputPerM +
-        b.cacheRead * pricing.cacheReadPerM + b.cacheWrite * pricing.cacheWritePerM) / 1e6;
-      if (isPeakBucket(b, pricing)) peak += c; else offPeak += c;
+      if (isPeakAt(b.date, b.weekday, b.hour, pricing)) peak += c; else offPeak += c;
+      for (const [model, t] of Object.entries(b.models)) {
+        const pr = modelPriceOf(model, pricing);
+        allPeak += (t.input * pr.inputPerM + t.output * pr.outputPerM +
+          t.cacheRead * pr.cacheReadPerM + t.cacheWrite * pr.cacheWritePerM) / 1e6;
+      }
     }
     return { total, peak, offPeak, savings: allPeak - total };
   }, [s, pricing]);
 
   const hourAgg = useMemo(() => {
     const out = Array.from({ length: 24 }, (_, hour) => ({ hour, total: 0 }));
-    for (const b of s.hourWeek ?? []) out[b.hour].total += bucketTokens(b);
+    for (const b of s.dayHour ?? []) out[b.hour].total += bucketTokens(b);
     return out;
   }, [s]);
   const max = Math.max(1, ...hourAgg.map((h) => h.total));
@@ -321,7 +406,7 @@ function SessionDetail({ s, pricing }: { s: SessionRow; pricing: UsagePricing })
             <div className="billing-card"><span className="billing-lbl">相对全高峰节省</span><span className="billing-val">{fmtCost(Math.max(0, bill.savings))}</span></div>
           </div>
           <div className="sd-meta">
-            <span>模型：{s.models.join(", ") || "—"}</span>
+            <span>模型：{s.models.map((m) => modelName(m)).join(", ") || "—"}</span>
             <span>时长：{dur ? fmtDuration(dur) : "—"}</span>
             <span>时间：{start ? `${fmtTime(start.getTime())} → ${end ? fmtTime(end.getTime()) : "…"}` : "—"}</span>
             <span>usage 事件：{s.events ?? 0} 次</span>
@@ -339,18 +424,126 @@ function SessionDetail({ s, pricing }: { s: SessionRow; pricing: UsagePricing })
   );
 }
 
+/* ------------------------------ 计价编辑器 ------------------------------ */
+
+const PRICE_FIELDS: { key: keyof ModelPrice; label: string }[] = [
+  { key: "inputPerM", label: "输入（未命中）" },
+  { key: "outputPerM", label: "输出" },
+  { key: "cacheReadPerM", label: "输入（缓存命中）" },
+  { key: "cacheWritePerM", label: "缓存写入" }
+];
+
+function PricingEditor({ pricing, setPricing, data }: {
+  pricing: UsagePricing;
+  setPricing: (p: UsagePricing) => void;
+  data: UsageData | null;
+}) {
+  const modelKeys = useMemo(() => {
+    const set = new Set<string>(Object.keys(pricing.models));
+    for (const m of data?.byModel ?? []) set.add(m.model);
+    return [...set];
+  }, [pricing.models, data]);
+
+  const setModelField = (model: string, key: keyof ModelPrice, v: number) => {
+    setPricing({
+      ...pricing,
+      models: {
+        ...pricing.models,
+        [model]: { ...(pricing.models[model] ?? pricing.models._default), [key]: v }
+      }
+    });
+  };
+
+  return (
+    <div className="price-editor">
+      {/* 全局规则 */}
+      <div className="slot-editor">
+        <span className="slot-label">高峰时段（北京时间，可增删）</span>
+        <div className="slot-list">
+          {pricing.peakSlots.map((s, i) => (
+            <div key={i} className="slot-row">
+              <input type="number" min={0} max={23} value={s.start}
+                onChange={(e) => {
+                  const v = Math.min(23, Math.max(0, Number(e.target.value) || 0));
+                  setPricing({ ...pricing, peakSlots: pricing.peakSlots.map((x, j) => (j === i ? { ...x, start: v } : x)) });
+                }} />
+              <span>—</span>
+              <input type="number" min={1} max={24} value={s.end}
+                onChange={(e) => {
+                  const v = Math.min(24, Math.max(1, Number(e.target.value) || 0));
+                  setPricing({ ...pricing, peakSlots: pricing.peakSlots.map((x, j) => (j === i ? { ...x, end: v } : x)) });
+                }} />
+              <button className="btn btn-ghost btn-xs" onClick={() => setPricing({ ...pricing, peakSlots: pricing.peakSlots.filter((_, j) => j !== i) })}>
+                <Trash2 size={12} />
+              </button>
+            </div>
+          ))}
+          <button className="btn btn-ghost btn-xs" onClick={() => setPricing({ ...pricing, peakSlots: [...pricing.peakSlots, { start: 9, end: 12 }] })}>
+            <Plus size={12} /> 添加时段
+          </button>
+        </div>
+        <label className="set-field slot-mult">
+          <span>空闲倍率（高峰 × 系数）</span>
+          <input type="number" step="0.05" min={0} max={1} value={pricing.offPeakMultiplier}
+            onChange={(e) => setPricing({ ...pricing, offPeakMultiplier: Math.max(0, Number(e.target.value) || 0) })} className="mono" />
+        </label>
+      </div>
+
+      <div className="slot-editor">
+        <label className="slot-toggle">
+          <input type="checkbox" checked={pricing.weekendFlat}
+            onChange={(e) => setPricing({ ...pricing, weekendFlat: e.target.checked })} />
+          <span>周末（周六/日）全天按空闲价</span>
+        </label>
+        <label className="set-field slot-start">
+          <span>生效日期（YYYY-MM-DD，该日期 00:00 起）</span>
+          <input type="date" value={pricing.weekendFlatStart}
+            onChange={(e) => setPricing({ ...pricing, weekendFlatStart: e.target.value })} className="mono" />
+        </label>
+        <button className="btn btn-ghost btn-xs" onClick={() => setPricing(structuredClone(DEFAULT_PRICING))} title="恢复 DeepSeek 官方默认计价">
+          <RotateCcw size={12} /> 恢复官方默认
+        </button>
+      </div>
+
+      {/* 模型单价 */}
+      <div className="model-prices">
+        {modelKeys.map((model) => {
+          const pr = pricing.models[model] ?? pricing.models._default;
+          const isDefault = model === "_default";
+          return (
+            <details key={model} className="mp-item" open={!isDefault}>
+              <summary>
+                <span className="mp-name">
+                  <span className="mb-dot" style={{ background: isDefault ? "var(--idle)" : MODEL_COLORS[modelKeys.indexOf(model) % MODEL_COLORS.length] }} />
+                  {modelName(model)}
+                  <span className="mp-ids">{isDefault ? "兜底（未列出的模型）" : model}</span>
+                </span>
+                <span className="mp-sum">输入 ¥{pr.inputPerM}/M · 输出 ¥{pr.outputPerM}/M · 缓存 ¥{pr.cacheReadPerM}/M</span>
+              </summary>
+              <div className="mp-fields">
+                {PRICE_FIELDS.map((f) => (
+                  <label key={f.key} className="set-field">
+                    <span>{f.label}</span>
+                    <input type="number" step="0.05" min={0} value={pr[f.key]}
+                      onChange={(e) => setModelField(model, f.key, Math.max(0, Number(e.target.value) || 0))} className="mono" />
+                  </label>
+                ))}
+              </div>
+            </details>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------------ 页面 ------------------------------ */
 
 export function UsageCard() {
   const [data, setData] = useState<UsageData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [pricing, setPricing] = useState<UsagePricing>({
-    inputPerM: 3, outputPerM: 9, cacheReadPerM: 0.1, cacheWritePerM: 3,
-    offPeakMultiplier: 0.5,
-    peakSlots: [{ start: 9, end: 12 }, { start: 14, end: 18 }],
-    weekendFlat: true
-  });
+  const [pricing, setPricing] = useState<UsagePricing>(structuredClone(DEFAULT_PRICING));
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const toggleSession = (id: string) =>
     setExpanded((prev) => {
@@ -386,33 +579,38 @@ export function UsageCard() {
     }
   };
 
-  /* 实时账单：按 byHourWeek 每桶 × 峰谷系数 */
+  /* 实时账单：按 byDayHour（日期×小时×模型）× 峰谷系数 × 模型单价 */
   const billing = useMemo(() => {
-    const buckets = data?.byHourWeek ?? [];
+    const buckets = data?.byDayHour ?? [];
     let total = 0, peak = 0, offPeak = 0, allPeak = 0, peakTok = 0, offTok = 0;
+    const dayCost = new Map<string, number>();
+    const modelCost = new Map<string, number>();
     for (const b of buckets) {
       const c = bucketCost(b, pricing);
       total += c;
-      allPeak += (b.input * pricing.inputPerM + b.output * pricing.outputPerM +
-        b.cacheRead * pricing.cacheReadPerM + b.cacheWrite * pricing.cacheWritePerM) / 1e6;
-      if (isPeakBucket(b, pricing)) { peak += c; peakTok += bucketTokens(b); }
+      const pk = isPeakAt(b.date, b.weekday, b.hour, pricing);
+      dayCost.set(b.date, (dayCost.get(b.date) ?? 0) + c);
+      if (pk) { peak += c; peakTok += bucketTokens(b); }
       else { offPeak += c; offTok += bucketTokens(b); }
+      for (const [model, t] of Object.entries(b.models)) {
+        const pr = modelPriceOf(model, pricing);
+        const raw = (t.input * pr.inputPerM + t.output * pr.outputPerM +
+          t.cacheRead * pr.cacheReadPerM + t.cacheWrite * pr.cacheWritePerM) / 1e6;
+        allPeak += raw;
+        modelCost.set(model, (modelCost.get(model) ?? 0) + raw * (pk ? 1 : pricing.offPeakMultiplier));
+      }
     }
     return {
-      total, peak, offPeak,
-      savings: (allPeak - total),
+      total, peak, offPeak, savings: allPeak - total,
       peakTok, offTok,
-      peakShare: peakTok + offTok > 0 ? peakTok / (peakTok + offTok) : 0
+      peakShare: peakTok + offTok > 0 ? peakTok / (peakTok + offTok) : 0,
+      dayCost, modelCost
     };
   }, [data, pricing]);
 
   const hourAgg = useMemo(() => {
-    const out = Array.from({ length: 24 }, (_, hour) => ({ hour, total: 0, inP: 0, outP: 0, cr: 0, cw: 0 }));
-    for (const b of data?.byHourWeek ?? []) {
-      const h = out[b.hour];
-      h.inP += b.input; h.outP += b.output; h.cr += b.cacheRead; h.cw += b.cacheWrite;
-      h.total += bucketTokens(b);
-    }
+    const out = Array.from({ length: 24 }, (_, hour) => ({ hour, total: 0 }));
+    for (const b of data?.byDayHour ?? []) out[b.hour].total += bucketTokens(b);
     return out;
   }, [data]);
 
@@ -428,7 +626,7 @@ export function UsageCard() {
           </span>
           <div>
             <h2>用量分析</h2>
-            <p className="sub">Token 消耗 · 峰谷计费账单（数据源：{data?.home ?? "…"}）</p>
+            <p className="sub">Token 消耗 · 多模型峰谷计费账单（数据源：{data?.home ?? "…"}）</p>
           </div>
         </div>
         <button className="btn btn-ghost btn-sm" onClick={load} disabled={loading}>
@@ -453,7 +651,7 @@ export function UsageCard() {
           {data ? <CompositionPie input={data.totals.input} output={data.totals.output} cacheRead={data.totals.cacheRead} cacheWrite={data.totals.cacheWrite} pricing={pricing} /> : <p className="hint">加载中…</p>}
         </div>
         <div className="usage-col">
-          <h3 className="section-title"><TrendingUp size={14} /> 峰谷账单（随单价实时计算）</h3>
+          <h3 className="section-title"><TrendingUp size={14} /> 峰谷账单（随单价/规则实时计算）</h3>
           <div className="billing-grid">
             <div className="billing-card peak">
               <span className="billing-lbl"><Clock size={12} /> 高峰费用</span>
@@ -473,108 +671,49 @@ export function UsageCard() {
             </div>
           </div>
           <p className="billing-note">
-            <Sun size={11} /> 高峰时段：{peakText}（北京时间）· 空闲 = 高峰 × {pricing.offPeakMultiplier}
-            {pricing.weekendFlat ? " · 周末全天空闲价" : ""}
+            <Sun size={11} /> 高峰：{peakText}（北京）· 空闲 = 高峰 × {pricing.offPeakMultiplier}
+            {pricing.weekendFlat
+              ? (pricing.weekendFlatStart
+                ? ` · 周末全天空闲（${pricing.weekendFlatStart} 起，此前周末仍分峰谷）`
+                : " · 周末全天空闲")
+              : " · 周末区分峰谷"}
           </p>
         </div>
       </div>
 
+      {/* 模型构成 */}
+      <h3 className="section-title" style={{ marginTop: 16 }}>
+        <Cpu size={14} /> 模型构成（各模型 tokens 与费用，多模型分别计价）
+      </h3>
+      {data && data.byModel.length > 0
+        ? <ModelBars byModel={data.byModel} modelCost={billing.modelCost} />
+        : <p className="hint">加载中…</p>}
+
       {/* 30 天柱状图 */}
       <h3 className="section-title" style={{ marginTop: 16 }}>最近 30 天消耗（输入 + 输出）</h3>
-      {data ? <DayBars byDay={data.byDay} /> : <p className="hint">加载中…</p>}
+      {data ? <DayBars days={data.byDay} dayCost={billing.dayCost} /> : <p className="hint">加载中…</p>}
 
       {/* 24 小时分布 */}
       <h3 className="section-title" style={{ marginTop: 16 }}>24 小时消耗分布（高峰时段高亮）</h3>
       {data ? <HourBars hourAgg={hourAgg} pricing={pricing} /> : <p className="hint">加载中…</p>}
 
-      {/* 星期 × 小时热力 */}
+      {/* 日期 × 小时热力 */}
       <h3 className="section-title" style={{ marginTop: 16 }}>
-        <CalendarDays size={14} /> 星期 × 小时 消耗热力（峰谷 / 周末空闲）
+        <CalendarDays size={14} /> 日期 × 小时 消耗热力（按真实日期标注峰谷）
       </h3>
-      {data ? <WeekHeat buckets={data.byHourWeek} pricing={pricing} /> : <p className="hint">加载中…</p>}
+      {data ? <DayHourHeatmap buckets={data.byDayHour} pricing={pricing} /> : <p className="hint">加载中…</p>}
 
       {/* 计费单价编辑器 */}
-      <h3 className="section-title" style={{ marginTop: 16 }}>计费单价（元 / 百万 token）</h3>
-      <div className="pricing-grid">
-        {([
-          ["inputPerM", "输入（缓存未命中）"],
-          ["outputPerM", "输出"],
-          ["cacheReadPerM", "输入（缓存命中）"],
-          ["cacheWritePerM", "缓存写入"]
-        ] as const).map(([key, label]) => (
-          <label key={key} className="set-field">
-            <span>高峰 · {label}</span>
-            <input
-              type="number"
-              step="0.05"
-              min={0}
-              value={pricing[key]}
-              onChange={(e) => setPricing((p) => ({ ...p, [key]: Math.max(0, Number(e.target.value) || 0) }))}
-              className="mono"
-            />
-          </label>
-        ))}
-        <label className="set-field">
-          <span>空闲倍率（高峰 × 系数）</span>
-          <input
-            type="number"
-            step="0.05"
-            min={0}
-            max={1}
-            value={pricing.offPeakMultiplier}
-            onChange={(e) => setPricing((p) => ({ ...p, offPeakMultiplier: Math.max(0, Number(e.target.value) || 0) }))}
-            className="mono"
-          />
-        </label>
-      </div>
-
-      <div className="slot-editor">
-        <span className="slot-label">高峰时段（北京时间，可增删）</span>
-        <div className="slot-list">
-          {pricing.peakSlots.map((s, i) => (
-            <div key={i} className="slot-row">
-              <input
-                type="number" min={0} max={23} value={s.start}
-                onChange={(e) => {
-                  const v = Math.min(23, Math.max(0, Number(e.target.value) || 0));
-                  setPricing((p) => ({ ...p, peakSlots: p.peakSlots.map((x, j) => (j === i ? { ...x, start: v } : x)) }));
-                }}
-              />
-              <span>—</span>
-              <input
-                type="number" min={1} max={24} value={s.end}
-                onChange={(e) => {
-                  const v = Math.min(24, Math.max(1, Number(e.target.value) || 0));
-                  setPricing((p) => ({ ...p, peakSlots: p.peakSlots.map((x, j) => (j === i ? { ...x, end: v } : x)) }));
-                }}
-              />
-              <button className="btn btn-ghost btn-xs" onClick={() => setPricing((p) => ({ ...p, peakSlots: p.peakSlots.filter((_, j) => j !== i) }))}>
-                <Trash2 size={12} />
-              </button>
-            </div>
-          ))}
-          <button
-            className="btn btn-ghost btn-xs"
-            onClick={() => setPricing((p) => ({ ...p, peakSlots: [...p.peakSlots, { start: 9, end: 12 }] }))}
-          >
-            <Plus size={12} /> 添加时段
-          </button>
-        </div>
-        <label className="slot-toggle">
-          <input
-            type="checkbox"
-            checked={pricing.weekendFlat}
-            onChange={(e) => setPricing((p) => ({ ...p, weekendFlat: e.target.checked }))}
-          />
-          <span>周末（周六/日）全天按空闲价</span>
-        </label>
-      </div>
-
+      <h3 className="section-title" style={{ marginTop: 16 }}>计费单价与峰谷规则（元 / 百万 token，可自定义）</h3>
+      <PricingEditor pricing={pricing} setPricing={setPricing} data={data} />
       <div className="pricing-actions">
         <button className="btn btn-primary btn-sm" onClick={savePricing}>
-          <Save size={14} /> 保存单价
+          <Save size={14} /> 保存计价
         </button>
-        <span className="hint">默认值来自 DeepSeek 官方定价文档（deepseek-v4-flash），修改后账单实时重算；保存后写入 config.json</span>
+        <span className="hint">
+          默认值取自 DeepSeek 官方定价文档（V4 Flash / Pro / Flash Vision），修改后账单实时重算；保存后写入 config.json。
+          官方周末全天空闲规则自 2026-08-23 起生效，页面按日期精确计费（此前周末仍分峰谷）。
+        </span>
       </div>
 
       {/* 热力图 */}
@@ -582,18 +721,21 @@ export function UsageCard() {
       {data ? <Heatmap byDay={data.byDay} /> : <p className="hint">加载中…</p>}
 
       {/* 按日明细 */}
-      <h3 className="section-title" style={{ marginTop: 16 }}>最近 30 天明细（费用为高峰价估算）</h3>
+      <h3 className="section-title" style={{ marginTop: 16 }}>最近 30 天明细（费用为峰谷实时计算）</h3>
       <div className="usage-table">
         <div className="ut-head"><span>日期</span><span>输入</span><span>输出</span><span>缓存读</span><span>费用</span></div>
-        {data?.byDay.slice(-30).reverse().map((d) => (
-          <div key={d.date} className="ut-row">
-            <span>{d.date}</span>
-            <span>{fmtTok(d.input)}</span>
-            <span>{fmtTok(d.output)}</span>
-            <span>{fmtTok(d.cacheRead)}</span>
-            <span className={d.cost > 5 ? "warn" : ""}>{fmtCost(d.cost)}</span>
-          </div>
-        ))}
+        {data?.byDay.slice(-30).reverse().map((d) => {
+          const c = billing.dayCost.get(d.date) ?? d.cost;
+          return (
+            <div key={d.date} className="ut-row">
+              <span>{d.date}</span>
+              <span>{fmtTok(d.input)}</span>
+              <span>{fmtTok(d.output)}</span>
+              <span>{fmtTok(d.cacheRead)}</span>
+              <span className={c > 5 ? "warn" : ""}>{fmtCost(c)}</span>
+            </div>
+          );
+        })}
       </div>
 
       {/* 按会话 */}
@@ -622,7 +764,7 @@ export function UsageCard() {
             <div key={s.id}>
               <div className="ut-row ut-row-session">
                 <span title={s.id}>{s.project} · {s.id.slice(0, 8)}</span>
-                <span>{s.models.join(", ") || "—"}</span>
+                <span>{s.models.map((m) => modelName(m)).join(", ") || "—"}</span>
                 <span>{fmtTok(s.input)}</span>
                 <span>{fmtTok(s.output)}</span>
                 <span>{fmtTok(s.cacheRead)}</span>

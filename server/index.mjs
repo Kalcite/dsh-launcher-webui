@@ -1358,7 +1358,8 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && p === "/api/usage/pricing") {
       const body = await readBody(req);
-      cfg.pricing = { ...(cfg.pricing ?? {}), ...(body ?? {}) };
+      // mergePricing：与默认深度合并（含多模型单价表），并兼容旧版扁平字段
+      cfg.pricing = usage.mergePricing(body ?? {});
       persistConfig();
       return sendJson(res, { ok: true, pricing: cfg.pricing });
     }

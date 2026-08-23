@@ -1,8 +1,8 @@
 /**
  * dsh-launcher 用量分析模块（server/usage.mjs）
  * - 扫描 DSH_HOME/sessions 下的会话日志（zstd 多帧解压）
- * - 解析 usage 事件（input/output/cache tokens），按日/会话/项目聚合
- * - 计费：单价表（元/百万 token，可配置），默认 deepseek 定价
+ * - 解析 usage 事件（input/output/cache tokens），按模型 / 日 / 小时 / 会话聚合
+ * - 计费：多模型单价表 + 峰谷时段 + 周末规则（全部可配置，默认 DeepSeek 官方定价）
  */
 import { zstdDecompress } from "node:zlib";
 import { promisify } from "node:util";
@@ -18,23 +18,52 @@ import path from "node:path";
 const zstdDecompressAsync = promisify(zstdDecompress);
 const ZSTD_MAGIC = 0xfd2fb528;
 
-// 默认单价与峰谷规则（元 / 百万 token，DeepSeek 官方文档，可被 config.json pricing 覆盖）：
+// 默认单价（元 / 百万 token）与峰谷规则，取自 DeepSeek 官方文档：
 // https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
-// 官方：高峰时段 9:00-12:00、14:00-18:00（北京时间）；空闲 = 高峰 × 0.5；
-//       2026-08-23 起周末（周六/日）全天按空闲价。
-// 以下默认值为文档表格中 deepseek-v4-flash 对应列（0.05/1.5/4.5 组合的高峰价）。
+// 高峰时段 9:00-12:00、14:00-18:00（北京时间）；空闲 = 高峰 × 0.5。
+// 2026-08-23（周日）00:00 起：周末（周六/日）全天按空闲价；
+// 该日期之前周末仍区分峰谷时段。周末规则与价格可能随官方调整，页面可全部自定义。
+// 模型单价 = 表格「高峰时段」列（缓存写入按输入未命中价计）：
+//   deepseek-v4-flash            输入 3.0 / 输出 9.0   / 缓存命中 0.1
+//   deepseek-v4-pro              输入 9.0 / 输出 27.0  / 缓存命中 0.3
+//   deepseek-v4-flash-vision-exp 输入 3.0 / 输出 9.0   / 缓存命中 0.1
 const DEFAULT_PRICING = {
-  inputPerM: 3,          // 高峰：输入（缓存未命中）
-  outputPerM: 9,         // 高峰：输出
-  cacheReadPerM: 0.1,    // 高峰：输入（缓存命中）
-  cacheWritePerM: 3,     // 高峰：缓存写入（未命中写入，按输入未命中价）
-  offPeakMultiplier: 0.5, // 空闲时段 = 高峰价 × 0.5
-  peakSlots: [           // 高峰时段（北京时间小时）
+  offPeakMultiplier: 0.5,          // 空闲 = 高峰 × 0.5
+  peakSlots: [                     // 高峰时段（北京时间小时）
     { start: 9, end: 12 },
     { start: 14, end: 18 }
   ],
-  weekendFlat: true      // 周末（周六/日）全天按空闲价
+  weekendFlat: true,               // 周末（周六/日）全天按空闲价
+  weekendFlatStart: "2026-08-23",  // 该日期（00:00 北京时间）起生效；留空 = 始终生效
+  models: {
+    "deepseek-v4-flash": { inputPerM: 3, outputPerM: 9, cacheReadPerM: 0.1, cacheWritePerM: 3 },
+    "deepseek-v4-pro": { inputPerM: 9, outputPerM: 27, cacheReadPerM: 0.3, cacheWritePerM: 9 },
+    "deepseek-v4-flash-vision-exp": { inputPerM: 3, outputPerM: 9, cacheReadPerM: 0.1, cacheWritePerM: 3 },
+    "_default": { inputPerM: 3, outputPerM: 9, cacheReadPerM: 0.1, cacheWritePerM: 3 }
+  }
 };
+
+/** 深度合并用户配置（兼容旧版扁平单价字段 → _default） */
+export function mergePricing(overrides) {
+  const p = structuredClone(DEFAULT_PRICING);
+  if (!overrides) return p;
+  for (const k of ["offPeakMultiplier", "peakSlots", "weekendFlat", "weekendFlatStart"]) {
+    if (overrides[k] !== undefined) p[k] = overrides[k];
+  }
+  if (overrides.models && typeof overrides.models === "object") {
+    p.models = { ...p.models, ...overrides.models };
+  }
+  // 兼容旧版扁平字段（写在 pricing 顶层的 inputPerM 等 → _default）
+  if (overrides.inputPerM !== undefined || overrides.outputPerM !== undefined) {
+    p.models._default = {
+      inputPerM: overrides.inputPerM ?? p.models._default.inputPerM,
+      outputPerM: overrides.outputPerM ?? p.models._default.outputPerM,
+      cacheReadPerM: overrides.cacheReadPerM ?? p.models._default.cacheReadPerM,
+      cacheWritePerM: overrides.cacheWritePerM ?? p.models._default.cacheWritePerM
+    };
+  }
+  return p;
+}
 
 /* ------------------------------ zstd 多帧解压（移植自 dsh 的 scanZstdFrames） ------------------------------ */
 
@@ -96,7 +125,7 @@ async function decompressSessionLog(buf) {
   return buf.toString("utf8");
 }
 
-/* ------------------------------ 解析与聚合 ------------------------------ */
+/* ------------------------------ 解析 ------------------------------ */
 
 function parseUsageLine(line) {
   let j;
@@ -115,7 +144,7 @@ function parseUsageLine(line) {
   };
 }
 
-/** 从 request/header 行提取模型名 */
+/** 从 request/header 行提取模型名（usage 事件归属最近一次出现的模型） */
 function parseModel(line) {
   try {
     const j = JSON.parse(line);
@@ -153,92 +182,178 @@ function walkSessions(home) {
   return files;
 }
 
-/** 用量总览：聚合 byDay / byHour / bySession / totals，含计费（默认单价） */
+/* ------------------------------ 计费规则（前端同构逻辑） ------------------------------ */
+
+function inPeakSlot(hour, pricing) {
+  return pricing.peakSlots.some((s) => hour >= s.start && hour < s.end);
+}
+
+/** 该日期是否处于「周末全天空闲」生效期 */
+function isWeekendFlatDate(date, pricing) {
+  if (!pricing.weekendFlat) return false;
+  const start = pricing.weekendFlatStart;
+  if (!start) return true; // 未配置起始日期 → 始终生效
+  return date >= start;    // YYYY-MM-DD 字符串可直接比较
+}
+
+/** (日期, 星期, 小时) 是否按高峰价计费 */
+function isPeakAt(date, weekday, hour, pricing) {
+  if ((weekday === 0 || weekday === 6) && isWeekendFlatDate(date, pricing)) return false;
+  return inPeakSlot(hour, pricing);
+}
+
+function modelPriceOf(model, pricing) {
+  return pricing.models[model] ?? pricing.models._default;
+}
+
+/** 单桶费用（按模型单价 × 峰谷系数） */
+function costOfBucket(b, pricing) {
+  const mult = isPeakAt(b.date, b.weekday, b.hour, pricing) ? 1 : pricing.offPeakMultiplier;
+  let cost = 0;
+  for (const [model, t] of Object.entries(b.models)) {
+    const pr = modelPriceOf(model, pricing);
+    cost += (t.input * pr.inputPerM + t.output * pr.outputPerM +
+      t.cacheRead * pr.cacheReadPerM + t.cacheWrite * pr.cacheWritePerM) / 1e6 * mult;
+  }
+  return cost;
+}
+
+/* ------------------------------ 聚合工具 ------------------------------ */
+
+function newTot() { return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }; }
+function addTot(dst, u) {
+  dst.input += u.input; dst.output += u.output;
+  dst.cacheRead += u.cacheRead; dst.cacheWrite += u.cacheWrite;
+}
+function totOf(map, key) {
+  let t = map.get(key);
+  if (!t) { t = newTot(); map.set(key, t); }
+  return t;
+}
+function bucketOf(map, key, date, weekday, hour) {
+  let b = map.get(key);
+  if (!b) { b = { date, weekday, hour, ...newTot(), models: new Map() }; map.set(key, b); }
+  return b;
+}
+const byDateHourSort = (a, b) => (a.date === b.date ? a.hour - b.hour : (a.date < b.date ? -1 : 1));
+
+/* ------------------------------ 用量总览 ------------------------------ */
+
+/**
+ * 聚合：
+ * - byDayHour：日期 × 小时 × 模型（计费基准，支持周末规则按日期生效 + 多模型单价）
+ * - byModel / byDay / byHour / byHourWeek（可视化）
+ * - bySession：会话级（含自己的 dayHour，供会话钻取实时计费）
+ */
 export async function usageOverview(cfg) {
   const home = cfg.dshHome ?? path.join(os.homedir(), ".dsh");
-  const pricing = { ...DEFAULT_PRICING, ...(cfg.pricing ?? {}) };
-  const costOf = (u) =>
-    (u.input / 1e6) * pricing.inputPerM +
-    (u.output / 1e6) * pricing.outputPerM +
-    (u.cacheRead / 1e6) * pricing.cacheReadPerM +
-    (u.cacheWrite / 1e6) * pricing.cacheWritePerM;
+  const pricing = mergePricing(cfg.pricing);
 
   const byDay = new Map();
-  const byHour = Array.from({ length: 24 }, () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }));
-  // 按 (星期 × 小时) 聚合：168 桶，weekday=0 周日（JS getDay），支持峰谷/周末实时计费
-  const byHourWeek = Array.from({ length: 168 }, () => ({ weekday: 0, hour: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }));
+  const byHour = Array.from({ length: 24 }, () => newTot());
+  const byHourWeek = Array.from({ length: 168 }, () => newTot());
+  const byDayHour = new Map();
+  const byModel = new Map();
   const bySession = new Map();
-  let input = 0, output = 0, cacheRead = 0, cacheWrite = 0, cost = 0, sessions = 0;
+  let input = 0, output = 0, cacheRead = 0, cacheWrite = 0, sessions = 0;
 
   for (const { file, project, sid } of walkSessions(home)) {
     try {
       const text = await decompressSessionLog(readFileSync(file));
-      let sessionInput = 0, sessionOutput = 0, sessionCacheRead = 0, sessionCacheWrite = 0;
-      let firstTs = null, lastTs = null, events = 0;
-      const sessionHourWeek = Array.from({ length: 168 }, () => ({ weekday: 0, hour: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }));
+      const sTot = newTot();
+      const sDayHour = new Map();
       const models = new Set();
+      let currentModel = null, firstTs = null, lastTs = null, events = 0;
       for (const line of text.split(/\r?\n/)) {
         if (!line.trim()) continue;
         const m = parseModel(line);
-        if (m) models.add(m);
+        if (m) currentModel = m;
         const u = parseUsageLine(line);
         if (!u) continue;
         events++;
+        const model = currentModel ?? "unknown";
         input += u.input; output += u.output; cacheRead += u.cacheRead; cacheWrite += u.cacheWrite;
-        sessionInput += u.input; sessionOutput += u.output; sessionCacheRead += u.cacheRead; sessionCacheWrite += u.cacheWrite;
+        addTot(sTot, u);
+        addTot(totOf(byModel, model), u);
+        models.add(model);
         if (u.ts) {
           if (firstTs === null || u.ts < firstTs) firstTs = u.ts;
           if (lastTs === null || u.ts > lastTs) lastTs = u.ts;
           const dt = new Date(u.ts);
-          const key = dayKey(u.ts);
-          const d = byDay.get(key) ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-          d.input += u.input; d.output += u.output; d.cacheRead += u.cacheRead; d.cacheWrite += u.cacheWrite;
-          byDay.set(key, d);
-          const h = dt.getHours();
-          byHour[h].input += u.input; byHour[h].output += u.output;
-          byHour[h].cacheRead += u.cacheRead; byHour[h].cacheWrite += u.cacheWrite;
-          const hw = byHourWeek[dt.getDay() * 24 + h];
-          hw.weekday = dt.getDay(); hw.hour = h;
-          hw.input += u.input; hw.output += u.output; hw.cacheRead += u.cacheRead; hw.cacheWrite += u.cacheWrite;
-          const shw = sessionHourWeek[dt.getDay() * 24 + h];
-          shw.weekday = dt.getDay(); shw.hour = h;
-          shw.input += u.input; shw.output += u.output; shw.cacheRead += u.cacheRead; shw.cacheWrite += u.cacheWrite;
+          const date = dayKey(u.ts);
+          addTot(totOf(byDay, date), u);
+          addTot(byHour[dt.getHours()], u);
+          addTot(byHourWeek[dt.getDay() * 24 + dt.getHours()], u);
+          const gb = bucketOf(byDayHour, `${date}|${dt.getHours()}`, date, dt.getDay(), dt.getHours());
+          addTot(gb, u);
+          addTot(totOf(gb.models, model), u);
+          const sb = bucketOf(sDayHour, `${date}|${dt.getHours()}`, date, dt.getDay(), dt.getHours());
+          addTot(sb, u);
+          addTot(totOf(sb.models, model), u);
         }
       }
-      if (sessionInput || sessionOutput) {
+      if (sTot.input || sTot.output) {
         sessions++;
+        const sBuckets = [...sDayHour.values()]
+          .map((b) => ({ ...b, models: Object.fromEntries(b.models) }))
+          .sort(byDateHourSort);
         bySession.set(sid, {
           id: sid,
           project,
           models: [...models],
-          input: sessionInput,
-          output: sessionOutput,
-          cacheRead: sessionCacheRead,
-          cacheWrite: sessionCacheWrite,
+          input: sTot.input,
+          output: sTot.output,
+          cacheRead: sTot.cacheRead,
+          cacheWrite: sTot.cacheWrite,
           events,
           firstTs,
           updatedAt: lastTs,
-          hourWeek: sessionHourWeek.filter((b) => b.input || b.output || b.cacheRead || b.cacheWrite),
-          cost: costOf({ input: sessionInput, output: sessionOutput, cacheRead: sessionCacheRead, cacheWrite: sessionCacheWrite })
+          dayHour: sBuckets,
+          cost: sBuckets.reduce((s, b) => s + costOfBucket(b, pricing), 0)
         });
       }
     } catch { /* 单文件损坏跳过 */ }
   }
 
-  cost = costOf({ input, output, cacheRead, cacheWrite });
-  const days = [...byDay.entries()].map(([date, v]) => ({
-    date, ...v, cost: costOf(v)
-  })).sort((a, b) => (a.date < b.date ? -1 : 1));
-  const hours = byHour.map((v, hour) => ({ hour, ...v, cost: costOf(v) }));
-  const hourWeek = byHourWeek.filter((b) => b.input || b.output || b.cacheRead || b.cacheWrite);
+  const byDateHour = [...byDayHour.values()]
+    .map((b) => ({ ...b, models: Object.fromEntries(b.models) }))
+    .sort(byDateHourSort);
+
+  // 按模型费用（逐桶 × 峰谷系数）
+  const modelCosts = new Map();
+  for (const b of byDateHour) {
+    const mult = isPeakAt(b.date, b.weekday, b.hour, pricing) ? 1 : pricing.offPeakMultiplier;
+    for (const [model, t] of Object.entries(b.models)) {
+      const pr = modelPriceOf(model, pricing);
+      const c = (t.input * pr.inputPerM + t.output * pr.outputPerM +
+        t.cacheRead * pr.cacheReadPerM + t.cacheWrite * pr.cacheWritePerM) / 1e6 * mult;
+      modelCosts.set(model, (modelCosts.get(model) ?? 0) + c);
+    }
+  }
+
+  const cost = byDateHour.reduce((s, b) => s + costOfBucket(b, pricing), 0);
+  const days = [...byDay.entries()].map(([date, v]) => {
+    const dayCost = byDateHour
+      .filter((b) => b.date === date)
+      .reduce((s, b) => s + costOfBucket(b, pricing), 0);
+    return { date, ...v, cost: dayCost };
+  }).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const hours = byHour.map((v, hour) => ({ hour, ...v, cost: 0 }));
+  const hourWeek = byHourWeek
+    .map((v, i) => ({ weekday: Math.floor(i / 24), hour: i % 24, ...v }))
+    .filter((b) => b.input || b.output || b.cacheRead || b.cacheWrite);
 
   return {
     home,
     pricing,
     totals: { input, output, cacheRead, cacheWrite, cost, sessions, activeDays: days.length },
+    byModel: [...byModel.entries()]
+      .map(([model, t]) => ({ model, ...t, cost: modelCosts.get(model) ?? 0 }))
+      .sort((a, b) => a.model.localeCompare(b.model)),
     byDay: days,
     byHour: hours,
     byHourWeek: hourWeek,
+    byDayHour: byDateHour,
     bySession: [...bySession.values()].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
   };
 }

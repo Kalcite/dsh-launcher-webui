@@ -103,15 +103,21 @@ export type PluginSearchResult = {
   error: string | null;
 };
 
-/** 计费单价与峰谷规则（元 / 百万 token）；默认值来自 DeepSeek 官方定价文档 */
-export type UsagePricing = {
+/** 单个模型的单价（元 / 百万 token，高峰价；空闲 = 高峰 × offPeakMultiplier） */
+export type ModelPrice = {
   inputPerM: number;        // 高峰：输入（缓存未命中）
   outputPerM: number;       // 高峰：输出
   cacheReadPerM: number;    // 高峰：输入（缓存命中）
   cacheWritePerM: number;   // 高峰：缓存写入
-  offPeakMultiplier: number; // 空闲 = 高峰 × 该系数（官方 0.5）
+};
+
+/** 计费单价与峰谷规则；默认值来自 DeepSeek 官方定价文档，用户可自定义 */
+export type UsagePricing = {
+  offPeakMultiplier: number;               // 空闲 = 高峰 × 该系数（官方 0.5）
   peakSlots: { start: number; end: number }[]; // 高峰时段（北京时间小时）
-  weekendFlat: boolean;     // 周末全天按空闲价
+  weekendFlat: boolean;                    // 周末全天按空闲价（自 weekendFlatStart 起）
+  weekendFlatStart: string;                // 生效日期 "YYYY-MM-DD"；留空 = 始终生效
+  models: Record<string, ModelPrice>;      // 模型单价表（含 _default 兜底）
 };
 
 export type SseMsg =
@@ -235,10 +241,12 @@ export const api = {
       home: string;
       pricing: UsagePricing;
       totals: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; sessions: number; activeDays: number };
+      byModel: { model: string; input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }[];
       byDay: { date: string; input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }[];
       byHour: { hour: number; input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }[];
       byHourWeek: { weekday: number; hour: number; input: number; output: number; cacheRead: number; cacheWrite: number }[];
-      bySession: { id: string; project: string; models: string[]; input: number; output: number; cacheRead: number; cacheWrite: number; events: number; firstTs: number | null; updatedAt: number | null; hourWeek: { weekday: number; hour: number; input: number; output: number; cacheRead: number; cacheWrite: number }[]; cost: number }[];
+      byDayHour: DayHourBucket[];
+      bySession: SessionRow[];
     }>(r)
   ),
   usagePricing: (body: Partial<UsagePricing>) =>
@@ -247,6 +255,28 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     }).then((r) => j<{ ok: boolean; pricing: unknown }>(r))
+};
+
+/** 日期 × 小时 × 模型 计费桶 */
+export type DayHourBucket = {
+  date: string;        // YYYY-MM-DD（北京时区）
+  weekday: number;     // 0=周日
+  hour: number;        // 0-23
+  input: number; output: number; cacheRead: number; cacheWrite: number;
+  models: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }>;
+};
+
+/** 会话行（含自己的 dayHour，供会话级实时计费） */
+export type SessionRow = {
+  id: string;
+  project: string;
+  models: string[];
+  input: number; output: number; cacheRead: number; cacheWrite: number;
+  events: number;
+  firstTs: number | null;
+  updatedAt: number | null;
+  dayHour: DayHourBucket[];
+  cost: number;
 };
 
 /** SSE 连接（自动重连由 EventSource 内置处理），返回关闭函数 */
