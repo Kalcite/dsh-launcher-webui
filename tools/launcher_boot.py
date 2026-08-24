@@ -85,23 +85,28 @@ def kill_tree(pid):
 
 
 def finish_pending():
-    """存在 .update-pending 标记 → pnpm install 收尾 → 删除标记。"""
+    """存在 .update-pending 标记 → pnpm install + pnpm run build 全量收尾 → 删除标记。
+
+    内置更新或外部 git pull 后重启时重建全部文件，避免网页停留在未构建/旧构建状态。
+    """
     if not MARK.exists():
         return
-    log("检测到待完成的更新，执行收尾 (pnpm install)…")
+    log("检测到待完成的更新，执行收尾 (pnpm install + pnpm run build)…")
     env = dict(os.environ)
     env["CI"] = "true"
     pnpm = KIT_ROOT / ".runtime" / "node" / "pnpm.cmd"
     try:
         if pnpm.exists():
             subprocess.run(f'"{pnpm}" install', cwd=str(KIT_ROOT), shell=True, env=env)
+            subprocess.run(f'"{pnpm}" run build', cwd=str(KIT_ROOT), shell=True, env=env)
         else:
             subprocess.run("pnpm install", cwd=str(KIT_ROOT), shell=True, env=env)
+            subprocess.run("pnpm run build", cwd=str(KIT_ROOT), shell=True, env=env)
     except Exception as e:
         log(f"收尾失败: {e}")
     try:
         MARK.unlink()
-        log("更新收尾完成，标记已清除")
+        log("更新收尾完成（已全量重建），标记已清除")
     except Exception:
         pass
 

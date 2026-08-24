@@ -227,6 +227,13 @@ tools\plugin.cmd enable <bundle>
 
 ## 更新日志
 
+### v0.7.2 — 修复环境构建（全量）+ 更新/拉取后自动全量重建
+
+- **「修复客户端构建」升级为「修复环境构建（全量）」**：随时可点（不再仅在 bundle 异常时出现），clean + 全量构建（含前端 `apps/web/dist` 与全部客户端 bundle），不碰 git；解决 "frontend dist not built" / "bundle script failed to load" / 网页未构建
+- **`setup.cmd` 前端部分改为无条件全量重建**（不再因 node_modules / dist 存在而跳过）：内置更新或外部 git pull 后执行 `setup.cmd` 即 install + build 全量重出，网页不会停留在未构建/旧构建状态
+- **`.update-pending` 收尾补跑 `pnpm run build`**：`launcher_boot.py` 重启收尾从仅 install 升级为 install + build 全量重建
+- 更新页 bundle 健康检查文案同步（含前端 web dist 项）
+
 ### v0.7.1 — 启动器日志按启动时间落盘 + dsh 前端 dist 自动补建
 
 - **启动器日志持久化**：每次启动 WebUI 检查并创建日志目录（`dshRoot/.dshctl/logs/`），本次启动的全部日志写入 **`launcher-<启动时间>.log`**（UTF-8，含时间/级别/来源）

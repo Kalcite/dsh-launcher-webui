@@ -148,26 +148,24 @@ export function UpdateCard({ busy, setBusy, deployResult }: Props) {
         </div>
       )}
 
-      {/* 客户端 bundle 健康（bundle script failed to load 的根源） */}
+      {/* 客户端 bundle 健康（bundle script failed to load 的根源）+ 全量修复入口 */}
       {bundles && (
         <div className={`bundle-health${bundlesBroken ? " broken" : " ok"}`}>
           <span className="bundle-health-label">
             {bundlesBroken ? (
-              <><AlertTriangle size={13} /> 客户端 bundle 异常：缺失 {bundles.missing.length}/{bundles.total} 个</>
+              <><AlertTriangle size={13} /> 环境构建异常：缺失 {bundles.missing.length}/{bundles.total} 个（含前端 web dist / 客户端 bundle）</>
             ) : (
-              <>客户端 bundle 完整（{bundles.total} 个）</>
+              <>环境构建完整（{bundles.total} 个，含前端 web dist）</>
             )}
           </span>
-          {bundlesBroken && (
-            <button className="btn btn-danger btn-sm" disabled={busy} onClick={repair} title="clean + 全量重建客户端 bundle">
-              <Wrench size={13} /> 修复客户端构建
-            </button>
-          )}
+          <button className="btn btn-danger btn-sm" disabled={busy} onClick={repair} title="不碰 git，clean + 全量构建（含前端 apps/web dist 与客户端 bundle），修复网页未构建 / bundle script failed to load">
+            <Wrench size={13} /> 修复环境构建（全量）
+          </button>
         </div>
       )}
       {!bundlesBroken && bundles && bundles.total > 0 && (
         <p className="hint">
-          若浏览器出现 "bundle script ... failed to load"，可手动点击「修复客户端构建」（clean + 全量重建）。
+          若浏览器出现 "bundle script ... failed to load" 或 dsh 启动报 "frontend dist not built"，可点击「修复环境构建（全量）」（clean + 全量构建，不碰 git）。
         </p>
       )}
 
@@ -238,9 +236,9 @@ export function UpdateCard({ busy, setBusy, deployResult }: Props) {
           className="btn btn-ghost"
           disabled={busy || loading}
           onClick={repair}
-          title="不碰 git，clean + 全量重建客户端 bundle（修复 bundle script failed to load）"
+          title="不碰 git，clean + 全量构建（含前端 apps/web dist 与客户端 bundle），修复网页未构建 / bundle script failed to load"
         >
-          <Wrench size={14} /> 修复客户端构建
+          <Wrench size={14} /> 修复环境构建（全量）
         </button>
       </div>
       {notice && <div className="notice-banner">{notice}</div>}

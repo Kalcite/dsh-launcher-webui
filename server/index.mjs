@@ -815,7 +815,7 @@ async function installBuildVerify(root, { clean = false, skipBuild = false } = {
   if (health.missing.length > 0) {
     pushLog(`[update] ⚠ 客户端 bundle 缺失 ${health.missing.length}/${health.total} 个：`);
     for (const m of health.missing) pushLog(`[update]    - ${m.name} → ${m.path}`);
-    pushLog("[update] 可点击「修复客户端构建」重试（clean + 全量重建）");
+    pushLog("[update] 可点击「修复环境构建（全量）」重试（clean + 全量重建）");
   } else {
     pushLog(`[update] 客户端 bundle 完整（${health.total} 个）`);
   }
@@ -954,10 +954,10 @@ async function recoverUpdate() {
   }
 }
 
-/** 修复客户端构建：不碰 git，clean + 全量重建 + 校验（解决 bundle script failed to load） */
+/** 修复环境构建（全量）：不碰 git，clean + 全量重建（含前端 apps/web dist 与客户端 bundle）+ 校验 */
 async function repairDsh() {
   const root = cfg.dshRoot;
-  pushLog(`[update] ══ 修复客户端构建 → ${root} ══`);
+  pushLog(`[update] ══ 修复环境构建（全量）→ ${root} ══`);
   if (state.busy) return { ok: false, error: "已有操作在执行，请稍候" };
   if (!existsSync(path.join(root, "package.json"))) {
     return { ok: false, error: `${root} 不是有效的 dsh 仓库` };

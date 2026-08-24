@@ -56,17 +56,16 @@ if errorlevel 1 goto py_fail
 :py_done
 echo [setup] Python venv: %VENV_PY%
 
-rem ---------- 3. launcher frontend ----------
-if exist "node_modules" goto fe_deps_done
+rem ---------- 3. launcher frontend (always full rebuild) ----------
+rem Rebuild unconditionally (no skip on existing node_modules/dist):
+rem after a built-in update or an external git pull, running this script
+rem fully rebuilds everything so the web UI is never left "not built".
 echo [setup] Installing launcher frontend dependencies ...
 call "%PNPM_CMD%" install
 if errorlevel 1 goto fe_fail
-:fe_deps_done
-if exist "dist\index.html" goto fe_done
-echo [setup] Building launcher frontend ...
+echo [setup] Building launcher frontend (full rebuild) ...
 call "%PNPM_CMD%" run build
 if errorlevel 1 goto fe_fail
-:fe_done
 
 rem ---------- 4. config defaults if missing ----------
 if exist "config.json" goto cfg_done
