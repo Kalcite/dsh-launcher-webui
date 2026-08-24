@@ -14,6 +14,8 @@ setlocal
 cd /d "%~dp0"
 chcp 65001 >nul
 title dsh-launcher setup
+rem Guarantee System32 on PATH (curl/tar/powershell resolve even if user PATH is broken)
+set "PATH=%SystemRoot%\System32;%SystemRoot%;%PATH%"
 
 set "NODE_EXE=%~dp0.runtime\node\node.exe"
 set "NPM_CMD=%~dp0.runtime\node\npm.cmd"

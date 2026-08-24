@@ -401,21 +401,60 @@ function kitPnpmCmd() {
   return existsSync(KIT_PNPM) ? KIT_PNPM : null;
 }
 
+const WIN_DIR = process.env.WINDIR ?? "C:\\Windows";
+const WIN_CMD_EXE = path.join(WIN_DIR, "System32", "cmd.exe");
+
 /**
- * 构建/安装用环境：把套件便携 node 目录前置到 PATH。
- * dsh 根构建脚本内部会以裸命令调 pnpm（如 scripts/build.ts 的 build:web），
- * 新机器系统 PATH 没有 pnpm 时会报 "'pnpm' 不是内部或外部命令" → 必须让子进程能解析到套件 pnpm。
+ * 构建/安装用环境：把套件便携 node 目录前置到 PATH，并保证 System32/Windows 目录在 PATH 内。
+ * 1) dsh 根构建脚本内部会以裸命令调 pnpm（如 scripts/build.ts 的 build:web），
+ *    新机器系统 PATH 没有 pnpm 时会报 "'pnpm' 不是内部或外部命令" → 必须让子进程能解析到套件 pnpm。
+ * 2) Windows 上 Node spawn 查找可执行文件只走 env.PATH（无 System32 兜底）：
+ *    用户 PATH 缺 System32 时连 cmd.exe 都解析不到（spawn cmd ENOENT）→ 强制注入。
  */
 function kitEnv(env = process.env) {
-  if (!existsSync(KIT_NODE_DIR)) return env;
-  return { ...env, PATH: `${KIT_NODE_DIR}${path.delimiter}${env.PATH ?? ""}` };
+  const parts = [];
+  if (existsSync(KIT_NODE_DIR)) parts.push(KIT_NODE_DIR);
+  const windir = env.WINDIR ?? process.env.WINDIR ?? "C:\\Windows";
+  for (const sys of [path.join(windir, "System32"), path.join(windir, "System"), windir]) {
+    if (existsSync(sys) && !parts.includes(sys)) parts.push(sys);
+  }
+  for (const p of String(env.PATH ?? "").split(path.delimiter)) {
+    if (p && !parts.includes(p)) parts.push(p);
+  }
+  return { ...env, PATH: parts.join(path.delimiter) };
+}
+
+/**
+ * 启动时修补进程自身 PATH：保证 System32 / Windows / 套件 node 目录在 PATH 内。
+ * Windows 上 Node 的 spawn/execFile 解析可执行文件只查 env.PATH（没有 System32 兜底），
+ * 用户 PATH 若缺 System32，cmd/netstat/taskkill/powershell/git 等裸命令全部解析失败。
+ * 修补一次即可覆盖本服务器所有 spawn 点（含未显式传 env 的调用）。
+ */
+function ensurePathSanity() {
+  const windir = process.env.WINDIR ?? "C:\\Windows";
+  const parts = [];
+  for (const sys of [path.join(windir, "System32"), windir]) {
+    if (existsSync(sys) && !parts.includes(sys)) parts.push(sys);
+  }
+  if (existsSync(KIT_NODE_DIR) && !parts.includes(KIT_NODE_DIR)) parts.push(KIT_NODE_DIR);
+  const cur = String(process.env.PATH ?? "");
+  for (const p of cur.split(path.delimiter)) {
+    if (p && !parts.includes(p)) parts.push(p);
+  }
+  const joined = parts.join(path.delimiter);
+  if (joined !== cur) {
+    process.env.PATH = joined;
+    pushLog("[launcher] ⚠ PATH 缺少系统目录，已自动注入 System32/Windows/便携 node（避免 cmd/git/powershell 等解析失败）", "warn", "launcher");
+  }
 }
 
 /** 流式执行命令：输出逐行进 pushLog（→ 环形缓冲 + SSE），返回 { code } */
 function runStream(cmd, args, opts = {}) {
   return new Promise((resolve) => {
-    pushLog(`[deploy] $ ${cmd} ${args.join(" ")}`);
-    const proc = spawn(cmd, args, {
+    // cmd 可能不在 PATH（用户 PATH 缺 System32）→ 用全路径，杜绝 spawn cmd ENOENT
+    const exe = cmd === "cmd" && existsSync(WIN_CMD_EXE) ? WIN_CMD_EXE : cmd;
+    pushLog(`[deploy] $ ${exe} ${args.join(" ")}`);
+    const proc = spawn(exe, args, {
       cwd: opts.cwd ?? LAUNCHER_ROOT,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
@@ -1572,6 +1611,8 @@ server.on("error", (err) => {
 
 // 启动时恢复上次可恢复快照（后端重启后仍能「尝试恢复」）
 loadLastOp();
+// 修补进程 PATH（System32/便携 node），保证全部子进程命令可解析
+ensurePathSanity();
 
 server.listen(cfg.launcherPort, "127.0.0.1", () => {
   console.log(`[dsh-launcher] 启动器 UI: http://127.0.0.1:${cfg.launcherPort}`);

@@ -21,6 +21,16 @@ import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+/** 子进程输出解码：Windows 中文输出为 GBK，UTF-8 尝试失败（替换符）则 GBK 回退（与 index.mjs 同构） */
+function decodeChunk(buf) {
+  try {
+    const s = buf.toString("utf8");
+    return s.includes("\uFFFD") ? new TextDecoder("gbk").decode(buf) : s;
+  } catch {
+    return buf.toString("utf8");
+  }
+}
+
 export const SPECIAL_PLUGINS = [
   {
     key: "routing-suite",
@@ -126,7 +136,7 @@ function runDshPlugin(ctx, args) {
       stdio: ["ignore", "pipe", "pipe"]
     });
     const tee = (chunk, prefix) => {
-      for (const line of chunk.toString("utf8").split(/\r?\n/)) {
+      for (const line of decodeChunk(chunk).split(/\r?\n/)) {
         if (line.trim()) ctx.pushLog(prefix ? `${prefix} ${line}` : line);
       }
     };
@@ -381,7 +391,7 @@ export async function toggle(ctx, bundle, disable) {
       stdio: ["ignore", "pipe", "pipe"]
     });
     const tee = (chunk, prefix) => {
-      for (const line of chunk.toString("utf8").split(/\r?\n/)) {
+      for (const line of decodeChunk(chunk).split(/\r?\n/)) {
         if (line.trim()) ctx.pushLog(prefix ? `${prefix} ${line}` : line);
       }
     };

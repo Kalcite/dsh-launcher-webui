@@ -227,6 +227,16 @@ tools\plugin.cmd enable <bundle>
 
 ## 更新日志
 
+### v0.7.6 — 全环节 PATH 加固（spawn cmd ENOENT 根因修复 + 全面审计）
+
+- **根因**：Windows 上 Node 的 `spawn`/`execFile` 查找可执行文件**只查 env.PATH**（没有 System32 兜底）——用户 PATH 缺 System32 时连 `cmd.exe` 都解析不到 → `spawn cmd ENOENT`，构建/更新全部失败
+- **三层加固（覆盖所有环节）**：
+  1. **服务器启动自愈**：`ensurePathSanity()` 修补进程自身 PATH（注入 System32 / Windows / 套件 node 目录），一次覆盖本服务器全部 spawn/execFile 点（cmd / netstat / taskkill / powershell / git / pnpm）
+  2. **launcher.cmd / launcher-stop.cmd / setup.cmd**：会话开头 `PATH=%SystemRoot%\System32;%SystemRoot%;%PATH%`，从源头保证（python / node 子进程继承）
+  3. **runStream 用 cmd.exe 全路径**，双保险
+- **插件管理输出 GBK 解码**：plugins.mjs 两处 tee 同步接入 UTF-8→GBK 回退（与 index.mjs 一致），中文插件输出不再乱码
+- 实测：PATH 仅剩套件目录启动 → 自动注入并警告 → env/status/usage/backup 全接口正常；spawn cmd ENOENT 复现与修复均验证
+
 ### v0.7.5 — 修复新机器构建报 "'pnpm' 不是内部或外部命令" + 日志 GBK 乱码
 
 - **根因**：环境检查虽能读到套件 pnpm，但**构建子进程的 PATH 里没有 `.runtime\node`**——dsh 根构建脚本内部用裸 `pnpm --filter ...` 调 `build:web`，新机器系统 PATH 无 pnpm 即报错，导致 `pnpm run build` 失败
