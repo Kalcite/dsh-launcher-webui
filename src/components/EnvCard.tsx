@@ -53,6 +53,7 @@ export function EnvCard({ env }: { env: EnvInfo | null }) {
           <Row k="pnpm" v={env.pnpm} code />
           <Row k="git" v={env.git} code />
           <Row k="便携 Node (.runtime)" v={env.portableNode ?? "未安装"} code />
+          <Row k="便携 pnpm (.runtime)" v={env.portablePnpm ?? "未安装"} code />
           <Row k="dsh 根目录" v={env.dshRoot} />
           <Row k="web 端口" v={String(env.webPort)} code />
           <Row k="profile" v={env.profile ?? "web"} code />

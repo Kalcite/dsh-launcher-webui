@@ -1003,10 +1003,14 @@ function persistConfig() {
 async function envInfo() {
   const now = Date.now();
   if (state.envCache && now - state.envCacheAt < 8000) return state.envCache;
+  // pnpm：优先套件便携版（.runtime\node\pnpm.cmd，setup.cmd 安装），新机器系统 PATH 可能没有 pnpm
+  const pnpmExe = kitPnpmCmd();
   const [node, pnpm, git, lc] = await Promise.all([
     run(process.execPath, ["--version"]),
     // Windows 上 pnpm 是 .ps1/.cmd shim，execFile 无法直接执行 → 用 cmd /c 包装
-    run("cmd", ["/c", "pnpm --version"]),
+    pnpmExe
+      ? run("cmd", ["/c", pnpmExe, "--version"])
+      : run("cmd", ["/c", "pnpm --version"]),
     run("git", ["--version"]),
     // 启动器自身版本与提交号（左下角信息栏）
     run("git", ["-C", LAUNCHER_ROOT, "rev-parse", "--short", "HEAD"])
@@ -1023,11 +1027,17 @@ async function envInfo() {
       if (r.ok) { portableNode = r.out; break; }
     }
   }
+  let portablePnpm = null;
+  if (pnpmExe) {
+    const r = await run("cmd", ["/c", pnpmExe, "--version"]);
+    if (r.ok) portablePnpm = r.out;
+  }
   state.envCache = {
     node: node.out || "?",
     pnpm: pnpm.out || "?",
     git: git.out || "?",
     portableNode,
+    portablePnpm,
     launcherVersion,
     launcherCommit: lc.ok ? lc.out : null,
     dshRoot: cfg.dshRoot,

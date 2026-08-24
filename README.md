@@ -227,6 +227,12 @@ tools\plugin.cmd enable <bundle>
 
 ## 更新日志
 
+### v0.7.3 — 环境检查 pnpm 解析修复（新机器显示 ?）
+
+- 修复新机器「开发环境」页 pnpm 显示 `?`：环境检查原来只查系统 PATH 的 pnpm（`cmd /c pnpm --version`），新机器 pnpm 只装在套件 `.runtime\node`（setup.cmd 安装）时显示 ?
+- 改为**优先套件便携 pnpm**（`.runtime\node\pnpm.cmd`），系统 PATH 无 pnpm 也能正确显示
+- 「开发环境」页新增 **便携 pnpm (.runtime)** 行，与便携 Node 并列展示
+
 ### v0.7.2 — 修复环境构建（全量）+ 更新/拉取后自动全量重建
 
 - **「修复客户端构建」升级为「修复环境构建（全量）」**：随时可点（不再仅在 bundle 异常时出现），clean + 全量构建（含前端 `apps/web/dist` 与全部客户端 bundle），不碰 git；解决 "frontend dist not built" / "bundle script failed to load" / 网页未构建

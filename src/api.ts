@@ -17,6 +17,7 @@ export type EnvInfo = {
   pnpm: string;
   git: string;
   portableNode: string | null;
+  portablePnpm: string | null;
   launcherVersion: string | null;
   launcherCommit: string | null;
   dshRoot: string;
