@@ -227,6 +227,12 @@ tools\plugin.cmd enable <bundle>
 
 ## 更新日志
 
+### v0.7.5 — 修复新机器构建报 "'pnpm' 不是内部或外部命令" + 日志 GBK 乱码
+
+- **根因**：环境检查虽能读到套件 pnpm，但**构建子进程的 PATH 里没有 `.runtime\node`**——dsh 根构建脚本内部用裸 `pnpm --filter ...` 调 `build:web`，新机器系统 PATH 无 pnpm 即报错，导致 `pnpm run build` 失败
+- **修复**：新增 `kitEnv()`，所有构建/安装命令（更新/部署/恢复/修复/启动器自更新/服务器启动）统一**把套件 node 目录前置到 PATH**，子进程裸 `pnpm` 一律可解析（实测：无套件 PATH 复现报错，前置后 pnpm 11.7.0 正常）
+- **日志 GBK 乱码修复**：Windows 中文 cmd/pnpm 输出为 GBK，子进程输出改为 UTF-8 优先 + 检测替换符后 **GBK 回退解码**（中文报错可读）
+
 ### v0.7.4 — .dshctl 数据目录收敛到启动器目录（按 dsh 本体区分）
 
 - `.dshctl` 不再散落在 dsh 本体目录：会话备份 / 恢复快照 / 启动器日志 / server.console.log 统一收敛到 **`<webui>/.dshctl/<dsh 本体键>/`**（键 = dsh 根目录绝对路径去特殊字符，如 `J__deepseek_harness`、`G__deepseek_harness`，不同 dsh 本体互不混淆）

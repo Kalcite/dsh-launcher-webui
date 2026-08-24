@@ -401,6 +401,16 @@ function kitPnpmCmd() {
   return existsSync(KIT_PNPM) ? KIT_PNPM : null;
 }
 
+/**
+ * 构建/安装用环境：把套件便携 node 目录前置到 PATH。
+ * dsh 根构建脚本内部会以裸命令调 pnpm（如 scripts/build.ts 的 build:web），
+ * 新机器系统 PATH 没有 pnpm 时会报 "'pnpm' 不是内部或外部命令" → 必须让子进程能解析到套件 pnpm。
+ */
+function kitEnv(env = process.env) {
+  if (!existsSync(KIT_NODE_DIR)) return env;
+  return { ...env, PATH: `${KIT_NODE_DIR}${path.delimiter}${env.PATH ?? ""}` };
+}
+
 /** 流式执行命令：输出逐行进 pushLog（→ 环形缓冲 + SSE），返回 { code } */
 function runStream(cmd, args, opts = {}) {
   return new Promise((resolve) => {
@@ -412,7 +422,7 @@ function runStream(cmd, args, opts = {}) {
       env: opts.env
     });
     const tee = (chunk, prefix) => {
-      for (const line of chunk.toString("utf8").split(/\r?\n/)) {
+      for (const line of decodeChunk(chunk).split(/\r?\n/)) {
         if (line.trim()) pushLog(prefix ? `${prefix} ${line}` : line);
       }
     };
@@ -424,6 +434,19 @@ function runStream(cmd, args, opts = {}) {
     });
     proc.on("exit", (code) => resolve({ code }));
   });
+}
+
+/**
+ * 子进程输出解码：Windows 中文 cmd/pnpm 输出为 GBK，先按 UTF-8 尝试，
+ * 出现替换符（�）说明是 GBK → 回退用 GBK 解码（中文报错不再乱码）。
+ */
+function decodeChunk(buf) {
+  try {
+    const s = buf.toString("utf8");
+    return s.includes("\uFFFD") ? new TextDecoder("gbk").decode(buf) : s;
+  } catch {
+    return buf.toString("utf8");
+  }
 }
 
 /** 解析目标的 git 默认分支（main / master） */
@@ -495,19 +518,20 @@ async function deployDsh(opts = {}) {
     const gitOk = await ensureGitRepo(target);
     if (!gitOk) return { ok: false, error: "git 同步失败，请查看日志" };
 
-    // 2) pnpm install（优先套件便携 pnpm，缺省用 cmd 里的 pnpm）
+    // 2) pnpm install（优先套件便携 pnpm，缺省用 cmd 里的 pnpm；PATH 前置套件 node 目录）
     pushLog("[deploy] 安装依赖 (pnpm install)…");
     const pnpm = kitPnpmCmd();
+    const buildEnv = kitEnv();
     let code;
-    if (pnpm) code = (await runStream("cmd", ["/c", pnpm, "install"], { cwd: target })).code;
-    else code = (await runStream("cmd", ["/c", "pnpm install"], { cwd: target })).code;
+    if (pnpm) code = (await runStream("cmd", ["/c", pnpm, "install"], { cwd: target, env: buildEnv })).code;
+    else code = (await runStream("cmd", ["/c", "pnpm install"], { cwd: target, env: buildEnv })).code;
     if (code !== 0) return { ok: false, error: `pnpm install 失败 (exit ${code})` };
 
     // 3) build（可跳过）
     if (!skipBuild) {
       pushLog("[deploy] 构建 (pnpm run build)…");
-      if (pnpm) code = (await runStream("cmd", ["/c", pnpm, "run", "build"], { cwd: target })).code;
-      else code = (await runStream("cmd", ["/c", "pnpm run build"], { cwd: target })).code;
+      if (pnpm) code = (await runStream("cmd", ["/c", pnpm, "run", "build"], { cwd: target, env: buildEnv })).code;
+      else code = (await runStream("cmd", ["/c", "pnpm run build"], { cwd: target, env: buildEnv })).code;
       if (code !== 0) return { ok: false, error: `pnpm run build 失败 (exit ${code})` };
       // 根 build 不产出前端 dist；web-app bundle 启动强制要求 → 缺失补跑 build:web
       const webCode = await ensureWebDist(target, pnpm, "deploy");
@@ -644,8 +668,8 @@ async function launcherUpdate() {
   pushLog("[launcher] ══ 启动器更新（分步：不中断当前进程）══");
   state.busy = true;
   try {
-    // CI=true 跳过 pnpm 的 deps 状态检查（避免 version/lockfile 短暂不一致时卡住）
-    const pnpmEnv = { ...process.env, CI: "true" };
+    // CI=true 跳过 pnpm 的 deps 状态检查；PATH 前置套件 node 目录（子进程裸 pnpm 可解析）
+    const pnpmEnv = kitEnv({ ...process.env, CI: "true" });
     const pnpm = kitPnpmCmd();
     const isGit = existsSync(path.join(LAUNCHER_ROOT, ".git"));
 
@@ -754,10 +778,11 @@ async function updateCheck() {
 /** 全量清理（移除所有 lib/ 与 tsbuildinfo，强制一致重建；版本切换后必须执行） */
 async function runClean(root) {
   const pnpm = kitPnpmCmd();
+  const env = kitEnv();
   pushLog("[update] pnpm run clean（清除增量构建缓存与旧产物）…");
   const code = pnpm
-    ? (await runStream("cmd", ["/c", pnpm, "run", "clean"], { cwd: root })).code
-    : (await runStream("cmd", ["/c", "pnpm run clean"], { cwd: root })).code;
+    ? (await runStream("cmd", ["/c", pnpm, "run", "clean"], { cwd: root, env })).code
+    : (await runStream("cmd", ["/c", "pnpm run clean"], { cwd: root, env })).code;
   return code;
 }
 
@@ -770,10 +795,11 @@ async function runClean(root) {
 async function ensureWebDist(root, pnpm, tag = "update") {
   const webDist = path.join(root, "apps", "web", "dist", "index.html");
   if (existsSync(webDist)) return 0;
+  const env = kitEnv();
   pushLog(`[${tag}] 前端 dist 缺失（apps/web/dist），补跑 pnpm run build:web…`);
   const code = pnpm
-    ? (await runStream("cmd", ["/c", pnpm, "run", "build:web"], { cwd: root })).code
-    : (await runStream("cmd", ["/c", "pnpm run build:web"], { cwd: root })).code;
+    ? (await runStream("cmd", ["/c", pnpm, "run", "build:web"], { cwd: root, env })).code
+    : (await runStream("cmd", ["/c", "pnpm run build:web"], { cwd: root, env })).code;
   if (code !== 0) pushLog(`[${tag}] ⚠ pnpm run build:web 失败 (exit ${code})`, "warn", tag);
   return code;
 }
@@ -825,10 +851,11 @@ function statSyncSafe(p) {
 /** 安装依赖 → （可选）清理 → 构建 → 客户端 bundle 校验，返回 { code, health } */
 async function installBuildVerify(root, { clean = false, skipBuild = false } = {}) {
   const pnpm = kitPnpmCmd();
+  const env = kitEnv({ ...process.env, CI: "true" });
   pushLog("[update] pnpm install…");
   let code = pnpm
-    ? (await runStream("cmd", ["/c", pnpm, "install"], { cwd: root })).code
-    : (await runStream("cmd", ["/c", "pnpm install"], { cwd: root })).code;
+    ? (await runStream("cmd", ["/c", pnpm, "install"], { cwd: root, env })).code
+    : (await runStream("cmd", ["/c", "pnpm install"], { cwd: root, env })).code;
   if (code !== 0) return { code, error: `pnpm install 失败 (exit ${code})` };
 
   if (clean && !skipBuild) {
@@ -839,8 +866,8 @@ async function installBuildVerify(root, { clean = false, skipBuild = false } = {
   if (!skipBuild) {
     pushLog("[update] pnpm run build（全量重建，消除版本切换残留）…");
     code = pnpm
-      ? (await runStream("cmd", ["/c", pnpm, "run", "build"], { cwd: root })).code
-      : (await runStream("cmd", ["/c", "pnpm run build"], { cwd: root })).code;
+      ? (await runStream("cmd", ["/c", pnpm, "run", "build"], { cwd: root, env })).code
+      : (await runStream("cmd", ["/c", "pnpm run build"], { cwd: root, env })).code;
     if (code !== 0) return { code, error: `pnpm run build 失败 (exit ${code})` };
     // 根 build 不产出前端 dist；web-app bundle 启动强制要求 → 缺失补跑 build:web
     const webCode = await ensureWebDist(root, pnpm);
@@ -1152,14 +1179,15 @@ async function startServer() {
     cwd: cfg.dshRoot,
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
-    // 指定 DSH_HOME：dsh 用户数据（profile/插件/会话等）跟随所选目录，而非 ~/.dsh
-    env: cfg.dshHome ? { ...process.env, DSH_HOME: cfg.dshHome } : process.env
+    // 指定 DSH_HOME：dsh 用户数据（profile/插件/会话等）跟随所选目录，而非 ~/.dsh；
+    // PATH 前置套件 node 目录（dsh 运行期内部裸调 pnpm 也能解析）
+    env: kitEnv(cfg.dshHome ? { ...process.env, DSH_HOME: cfg.dshHome } : process.env)
   });
   state.proc = proc;
   state.startedAt = new Date().toISOString();
 
   const tee = (chunk, prefix) => {
-    const text = chunk.toString("utf8");
+    const text = decodeChunk(chunk);
     if (stream) stream.write(text);
     for (const line of text.split(/\r?\n/)) {
       if (line.trim()) pushLog(prefix ? `${prefix} ${line}` : line);
