@@ -262,7 +262,7 @@ export async function search(ctx, q = "") {
 
 /** 安装前备份：cordis.patch.yml 备份 + 当前 bundles，供「尝试恢复」使用 */
 function backupProfileConfig(ctx) {
-  const backupDir = path.join(ctx.cfg.dshRoot, ".dshctl", "backups");
+  const backupDir = typeof ctx.dshDataDir === "function" ? ctx.dshDataDir("backups") : path.join(ctx.cfg.dshRoot, ".dshctl", "backups");
   mkdirSync(backupDir, { recursive: true });
   const patch = path.join(profileDir(ctx), "cordis.patch.yml");
   const patchBackup = path.join(backupDir, `patch-${Date.now()}.yml`);

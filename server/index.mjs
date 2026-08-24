@@ -4,7 +4,7 @@
  *
  * 职责：
  *  - 管理 dsh web 服务器生命周期（start / stop / restart + HTTP 探活）
- *  - 收集 dsh 服务器输出：环形缓冲 + 落盘 .dshctl/server.console.log（与 dsh.cmd 一致）
+ *  - 收集 dsh 服务器输出：环形缓冲 + 落盘 webui/.dshctl/<dsh>/server.console.log
  *  - SSE (/api/events) 实时推送日志与状态
  *  - 提供前端静态资源（生产模式 dist/）
  *
@@ -115,6 +115,7 @@ const pluginCtx = {
   pushLog,
   runStream,
   kitNodeExe,
+  dshDataDir: (...sub) => dshDataDir(...sub),
   recordLastOp,
   lastOp: () => state.lastOp,
   backupSessions: (reason) => backupSessions(reason)
@@ -137,9 +138,43 @@ const state = {
 };
 const sseClients = new Set();
 
+/* ------------------------------ dsh 数据目录（统一收敛到 webui 目录下的 .dshctl，按 dsh 本体区分） ------------------------------ */
+
+/**
+ * 每个 dsh 本体一个目录键：基于绝对路径去除非安全字符（可读且唯一，跨盘符/目录不混淆）。
+ * 例：J:\deepseek_harness → J__deepseek_harness；G:\deepseek-harness → G__deepseek_harness
+ */
+function dshRootKey(root) {
+  return path.resolve(LAUNCHER_ROOT, root).replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+/** dsh 数据目录：<webui>/.dshctl/<dsh本体键>/[...sub]，不再在 dsh 本体目录里创建 .dshctl */
+function dshDataDir(...sub) {
+  return path.join(LAUNCHER_ROOT, ".dshctl", dshRootKey(cfg.dshRoot), ...sub);
+}
+
+/** 一次性迁移：旧位置 <dshRoot>/.dshctl 下的 backups/logs/server.console.log → 新位置（原目录保留） */
+function migrateDshctl() {
+  const old = path.join(cfg.dshRoot, ".dshctl");
+  const fresh = dshDataDir();
+  if (old === fresh || !existsSync(old) || existsSync(fresh)) return;
+  try {
+    mkdirSync(fresh, { recursive: true });
+    for (const name of ["backups", "logs", "server.console.log"]) {
+      const src = path.join(old, name);
+      if (existsSync(src) && !existsSync(path.join(fresh, name))) {
+        cpSync(src, path.join(fresh, name), { recursive: true });
+      }
+    }
+    pushLog(`[launcher] 已迁移 .dshctl 数据 → ${fresh}（旧目录 ${old} 已保留，可手动删除）`, "info", "launcher");
+  } catch (e) {
+    pushLog(`[launcher] .dshctl 迁移失败: ${e?.message ?? e}`, "warn", "launcher");
+  }
+}
+
 /* ------------------------------ 启动器日志（每次启动一个文件，按启动时间命名；目录缺失自动重建） ------------------------------ */
 
-const LAUNCHER_LOG_DIR = () => path.join(cfg.dshRoot, ".dshctl", "logs");
+const LAUNCHER_LOG_DIR = () => dshDataDir("logs");
 let launcherLogStream = null;   // 本次启动的日志文件流
 let launcherLogPath = null;
 let launcherLogRetryAt = 0;
@@ -190,6 +225,7 @@ function writeLauncherLog(line, level, source) {
   } catch { /* 写入失败忽略，下次自动重建 */ }
 }
 
+migrateDshctl();
 initLauncherLog();
 pushLog(`══ 启动器启动 ══（日志落盘：${launcherLogPath ?? "写入失败，仅内存缓冲"}）`);
 
@@ -214,11 +250,11 @@ function pushLog(line, level = "info", source = "launcher") {
   writeLauncherLog(line, level, source); // 落盘到本次启动的日志文件（按启动时间命名）
 }
 
-/** 记录可恢复操作的快照（更新前版本 / 插件安装前配置），供「尝试恢复」使用；持久化到 .dshctl/backups/lastop.json */
+/** 记录可恢复操作的快照（更新前版本 / 插件安装前配置），供「尝试恢复」使用；持久化到 webui/.dshctl/<dsh>/backups/lastop.json */
 function recordLastOp(kind, data) {
   state.lastOp = { kind, ts: Date.now(), data };
   try {
-    const backupsDir = path.join(cfg.dshRoot, ".dshctl", "backups");
+    const backupsDir = dshDataDir("backups");
     mkdirSync(backupsDir, { recursive: true });
     writeFileSync(path.join(backupsDir, "lastop.json"), JSON.stringify(state.lastOp, null, 2), "utf8");
   } catch { /* 持久化失败不影响内存快照 */ }
@@ -228,14 +264,14 @@ function recordLastOp(kind, data) {
 /** 启动时加载持久化的恢复快照（后端重启后仍可恢复） */
 function loadLastOp() {
   try {
-    const f = path.join(cfg.dshRoot, ".dshctl", "backups", "lastop.json");
+    const f = dshDataDir("backups", "lastop.json");
     if (existsSync(f)) state.lastOp = JSON.parse(readFileSync(f, "utf8"));
   } catch { /* 无快照 */ }
 }
 
 /* ------------------------------ 会话备份（升级 dsh/插件前保护） ------------------------------ */
 
-const backupsFile = () => path.join(cfg.dshRoot, ".dshctl", "backups", "backups.json");
+const backupsFile = () => dshDataDir("backups", "backups.json");
 
 function readBackups() {
   try { return JSON.parse(readFileSync(backupsFile(), "utf8")); } catch { return []; }
@@ -248,12 +284,12 @@ function writeBackups(list) {
   } catch { /* 记录失败不阻断 */ }
 }
 
-/** 备份 dsh 会话数据（$DSH_HOME/sessions）到 .dshctl/backups/sessions-<ts>/，并写记录 */
+/** 备份 dsh 会话数据（$DSH_HOME/sessions）到 webui/.dshctl/<dsh>/backups/sessions-<ts>/，并写记录 */
 function backupSessions(reason = "手动备份") {
   const home = cfg.dshHome ?? path.join(homedir(), ".dsh");
   const src = path.join(home, "sessions");
   const id = `sessions-${Date.now()}`;
-  const target = path.join(cfg.dshRoot, ".dshctl", "backups", id);
+  const target = dshDataDir("backups", id);
   try {
     if (!existsSync(src)) {
       pushLog(`[backup] ⚠ 未找到会话目录 ${src}，跳过备份（仍记录）`, "warn", "launcher");
@@ -1057,7 +1093,7 @@ async function serverStatus() {
   const running = pids.length > 0;
   let httpOk = false;
   if (running) httpOk = await probeHttp(cfg.webPort);
-  const logFile = path.join(cfg.dshRoot, ".dshctl", "server.console.log");
+  const logFile = dshDataDir("server.console.log");
   return {
     running,
     httpOk,
@@ -1087,7 +1123,7 @@ async function startServer() {
   }
 
   state.busy = true;
-  const logFile = path.join(cfg.dshRoot, ".dshctl", "server.console.log");
+  const logFile = dshDataDir("server.console.log");
   await mkdir(path.dirname(logFile), { recursive: true }).catch(() => {});
   // 尽力而为写盘：文件可能被正在运行的实例（如 dsh.cmd 的 Tee-Object）锁定 → EBUSY，
   // 此时降级为仅内存环形缓冲，绝不因此让启动器崩溃
@@ -1353,9 +1389,10 @@ const server = http.createServer(async (req, res) => {
         web: () => openUrl(`http://127.0.0.1:${cfg.webPort}`),
         folder: () => execFile("cmd", ["/c", "start", "", cfg.dshRoot], { windowsHide: true, detached: true }, () => {}),
         vscode: () => execFile("cmd", ["/c", "start", "", "code", cfg.dshRoot], { windowsHide: true, detached: true }, () => {}),
-        // 打开服务端日志目录（dshRoot/.dshctl，含 server.console.log）
+        // 打开日志目录（webui/.dshctl/<dsh>/，含 launcher 日志与 server.console.log）
         logs: () => {
-          const logsDir = path.join(cfg.dshRoot, ".dshctl");
+          const logsDir = dshDataDir();
+          mkdirSync(logsDir, { recursive: true });
           execFile("cmd", ["/c", "start", "", logsDir], { windowsHide: true, detached: true }, () => {});
         }
       };

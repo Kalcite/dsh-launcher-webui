@@ -209,7 +209,7 @@ export function SettingsCard({ env, busy, setBusy, deployResult }: Props) {
           </button>
         </div>
         <p className="hint">
-          备份 ~/.dsh/sessions 到 .dshctl/backups/；dsh 升级与插件安装/更新/卸载前自动备份，用于回退保护。
+          备份 ~/.dsh/sessions 到 启动器目录 .dshctl/&lt;dsh 本体&gt;/backups/（按 dsh 区分，不写入 dsh 本体目录）；dsh 升级与插件安装/更新/卸载前自动备份，用于回退保护。
         </p>
         <div className="backup-list">
           {backups.length === 0 ? (

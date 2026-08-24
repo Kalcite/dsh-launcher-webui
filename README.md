@@ -227,6 +227,13 @@ tools\plugin.cmd enable <bundle>
 
 ## 更新日志
 
+### v0.7.4 — .dshctl 数据目录收敛到启动器目录（按 dsh 本体区分）
+
+- `.dshctl` 不再散落在 dsh 本体目录：会话备份 / 恢复快照 / 启动器日志 / server.console.log 统一收敛到 **`<webui>/.dshctl/<dsh 本体键>/`**（键 = dsh 根目录绝对路径去特殊字符，如 `J__deepseek_harness`、`G__deepseek_harness`，不同 dsh 本体互不混淆）
+- 路径示例：`<webui>/.dshctl/J__deepseek_harness/backups/`、`.../logs/launcher-<时间>.log`、`.../server.console.log`
+- **启动时自动迁移**旧位置 `<dshRoot>/.dshctl` 下的 backups / logs / server.console.log 到新目录（原目录保留可手动删除）
+- 插件安装前的 patch 备份（plugins.mjs）、「打开日志」按钮、设置页说明同步更新
+
 ### v0.7.3 — 环境检查 pnpm 解析修复（新机器显示 ?）
 
 - 修复新机器「开发环境」页 pnpm 显示 `?`：环境检查原来只查系统 PATH 的 pnpm（`cmd /c pnpm --version`），新机器 pnpm 只装在套件 `.runtime\node`（setup.cmd 安装）时显示 ?
