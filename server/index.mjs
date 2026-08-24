@@ -137,6 +137,62 @@ const state = {
 };
 const sseClients = new Set();
 
+/* ------------------------------ 启动器日志（每次启动一个文件，按启动时间命名；目录缺失自动重建） ------------------------------ */
+
+const LAUNCHER_LOG_DIR = () => path.join(cfg.dshRoot, ".dshctl", "logs");
+let launcherLogStream = null;   // 本次启动的日志文件流
+let launcherLogPath = null;
+let launcherLogRetryAt = 0;
+let launcherLogCheckAt = 0;     // 文件存在性探测节流
+
+function pad2(n) { return String(n).padStart(2, "0"); }
+
+/** 初始化本次启动的日志文件（目录缺失自动重建），返回文件路径或 null */
+function initLauncherLog() {
+  try {
+    const dir = LAUNCHER_LOG_DIR();
+    mkdirSync(dir, { recursive: true });
+    const d = new Date();
+    const stamp = `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
+    launcherLogPath = path.join(dir, `launcher-${stamp}.log`);
+    const s = createWriteStream(launcherLogPath, { flags: "a" });
+    s.on("error", () => {
+      // 磁盘异常等 → 置空，稍后由 writeLauncherLog 重建（节流）
+      launcherLogStream = null;
+      launcherLogRetryAt = Date.now() + 2000;
+    });
+    launcherLogStream = s;
+    return launcherLogPath;
+  } catch {
+    launcherLogStream = null;
+    return null;
+  }
+}
+
+/** 把一行日志追加到本次启动的日志文件（目录/文件被删时自动重建） */
+function writeLauncherLog(line, level, source) {
+  if (!launcherLogStream || !launcherLogPath) {
+    if (Date.now() < launcherLogRetryAt) return;
+    if (!initLauncherLog()) { launcherLogRetryAt = Date.now() + 5000; return; }
+  }
+  // Windows 上删除已打开的文件不会触发 error（句柄仍可写），需主动探测存在性（2s 节流）
+  if (Date.now() >= launcherLogCheckAt + 2000) {
+    launcherLogCheckAt = Date.now();
+    if (!existsSync(launcherLogPath)) {
+      launcherLogStream = null;
+      launcherLogRetryAt = 0; // 立即重建目录与文件
+      initLauncherLog();
+      if (!launcherLogStream) { launcherLogRetryAt = Date.now() + 5000; return; }
+    }
+  }
+  try {
+    launcherLogStream.write(`[${new Date().toISOString()}] [${level}] [${source}] ${line}\n`);
+  } catch { /* 写入失败忽略，下次自动重建 */ }
+}
+
+initLauncherLog();
+pushLog(`══ 启动器启动 ══（日志落盘：${launcherLogPath ?? "写入失败，仅内存缓冲"}）`);
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -155,6 +211,7 @@ function pushLog(line, level = "info", source = "launcher") {
   if (state.events.length > 2000) state.events.splice(0, state.events.length - 2000);
   broadcast({ type: "log", entry });
   broadcast({ type: "event", event: ev });
+  writeLauncherLog(line, level, source); // 落盘到本次启动的日志文件（按启动时间命名）
 }
 
 /** 记录可恢复操作的快照（更新前版本 / 插件安装前配置），供「尝试恢复」使用；持久化到 .dshctl/backups/lastop.json */
@@ -416,6 +473,9 @@ async function deployDsh(opts = {}) {
       if (pnpm) code = (await runStream("cmd", ["/c", pnpm, "run", "build"], { cwd: target })).code;
       else code = (await runStream("cmd", ["/c", "pnpm run build"], { cwd: target })).code;
       if (code !== 0) return { ok: false, error: `pnpm run build 失败 (exit ${code})` };
+      // 根 build 不产出前端 dist；web-app bundle 启动强制要求 → 缺失补跑 build:web
+      const webCode = await ensureWebDist(target, pnpm, "deploy");
+      if (webCode !== 0) return { ok: false, error: `pnpm run build:web 失败 (exit ${webCode})` };
     }
 
     // 4) 部署成功 → 切换配置指向新目录
@@ -666,12 +726,35 @@ async function runClean(root) {
 }
 
 /**
+ * 确保 dsh 前端 dist 存在：根目录 `pnpm run build` 不产出 apps/web/dist，
+ * 而 web-app bundle 启动时强制 require.resolve('@deepseek-ai/dsh-web-frontend/dist/index.html')，
+ * 缺失会报 "web-app: frontend dist not built" 导致 dsh 无法启动 → 缺失时补跑 pnpm run build:web。
+ * @returns {Promise<number>} 0=就绪
+ */
+async function ensureWebDist(root, pnpm, tag = "update") {
+  const webDist = path.join(root, "apps", "web", "dist", "index.html");
+  if (existsSync(webDist)) return 0;
+  pushLog(`[${tag}] 前端 dist 缺失（apps/web/dist），补跑 pnpm run build:web…`);
+  const code = pnpm
+    ? (await runStream("cmd", ["/c", pnpm, "run", "build:web"], { cwd: root })).code
+    : (await runStream("cmd", ["/c", "pnpm run build:web"], { cwd: root })).code;
+  if (code !== 0) pushLog(`[${tag}] ⚠ pnpm run build:web 失败 (exit ${code})`, "warn", tag);
+  return code;
+}
+
+/**
  * 客户端 bundle 健康检查：扫描声明了 dsh.client 的包，核对 lib/client.js 是否存在。
  * 缺失的 bundle 会导致浏览器端 "bundle script ... failed to load"。
  */
 function checkClientBundles(root) {
   const missing = [];
   let total = 0;
+  // web-app bundle 启动时强制 require 前端 dist；缺失会导致 "web-app: frontend dist not built"
+  const webDist = path.join(root, "apps", "web", "dist", "index.html");
+  if (!existsSync(webDist)) {
+    total++;
+    missing.push({ name: "@deepseek-ai/dsh-web-app（前端 dist）", path: webDist });
+  }
   const scanDirs = [path.join(root, "packages")];
   for (const base of scanDirs) {
     if (!existsSync(base)) continue;
@@ -723,6 +806,9 @@ async function installBuildVerify(root, { clean = false, skipBuild = false } = {
       ? (await runStream("cmd", ["/c", pnpm, "run", "build"], { cwd: root })).code
       : (await runStream("cmd", ["/c", "pnpm run build"], { cwd: root })).code;
     if (code !== 0) return { code, error: `pnpm run build 失败 (exit ${code})` };
+    // 根 build 不产出前端 dist；web-app bundle 启动强制要求 → 缺失补跑 build:web
+    const webCode = await ensureWebDist(root, pnpm);
+    if (webCode !== 0) return { code: webCode, error: `pnpm run build:web 失败 (exit ${webCode})` };
   }
 
   const health = checkClientBundles(root);

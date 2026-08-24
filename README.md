@@ -227,6 +227,15 @@ tools\plugin.cmd enable <bundle>
 
 ## 更新日志
 
+### v0.7.1 — 启动器日志按启动时间落盘 + dsh 前端 dist 自动补建
+
+- **启动器日志持久化**：每次启动 WebUI 检查并创建日志目录（`dshRoot/.dshctl/logs/`），本次启动的全部日志写入 **`launcher-<启动时间>.log`**（UTF-8，含时间/级别/来源）
+  - 日志目录或文件被删除后**自动重建**（Windows 上已打开的文件被删不会触发错误事件，采用存在性探测 + 节流重建），日志不再丢失
+- **修复 dsh 在全新机器上启动失败**（`web-app: frontend dist not built`）：
+  - 原因：dsh 根目录 `pnpm run build` 不产出前端 `apps/web/dist`，而 `web-app` bundle 启动时强制 require 该 dist
+  - 更新/部署/恢复/修复四条构建路径在 dist 缺失时**自动补跑 `pnpm run build:web`**
+  - 「客户端 bundle 健康检查」新增 `@deepseek-ai/dsh-web-app（前端 dist）` 项，缺失会提示并可一键修复
+
 ### v0.7.0 — 用量分析：多模型计价 + 日期级峰谷（周末规则 2026-08-23 起生效）
 
 - **多模型分别计价**（官方定价表，元/百万 token 高峰价）：
