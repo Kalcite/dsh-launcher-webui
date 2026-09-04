@@ -4,5 +4,9 @@
   "webPort": 3080,
   "launcherPort": 5177,
   "profile": null,
-  "openBrowser": false
+  "openBrowser": false,
+  "standbyRoot": ".dsh_temp/dsh",
+  "standbyHome": ".dsh_temp/.dsh",
+  "standbyWebPort": 3090,
+  "standbyTag": "dsh-v0.1.3-alpha.1"
 }

@@ -21,7 +21,7 @@ export default function App() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [deployResult, setDeployResult] = useState<{ ok: boolean; error?: string; target?: string } | null>(null);
+  const [deployResult, setDeployResult] = useState<{ ok: boolean; error?: string; target?: string; mode?: string } | null>(null);
   const [fatal, setFatal] = useState<FatalInfo | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     try { return (localStorage.getItem("dsh-theme") as "dark" | "light") || "dark"; } catch { return "dark"; }
@@ -65,7 +65,7 @@ export default function App() {
       } else if (m.type === "refresh") {
         refresh();
       } else if (m.type === "deploy") {
-        setDeployResult({ ok: m.ok, error: m.error, target: m.target });
+        setDeployResult({ ok: m.ok, error: m.error, target: m.target, mode: m.mode });
         refresh();
       } else if (m.type === "fatal") {
         // 致命错误：终止导致错误的进程（后端已清理）+ 弹出错误提示

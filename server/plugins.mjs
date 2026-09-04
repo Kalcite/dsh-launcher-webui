@@ -5,7 +5,7 @@
  * - 安装/禁用/启用/卸载（profile bundle 层 + cordis.patch.yml）
  * - 特殊插件 dsh-routing-suite（注入器 + 路由预设，含二次修复）
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   readFileSync,
@@ -39,7 +39,7 @@ export const SPECIAL_PLUGINS = [
     description: "运行时注入器（dev_* 工具全家桶）+ 思维模式路由预设（Router Standard / Router Spec）",
     needsFix: true,
     install: { source: "routing-suite" },
-    fixNote: "由两个子模块组成（dsh-super-injector + dsh-router-standard）。安装后可能需要二次修复：注入器 lib 预构建、preset.yml 描述引号修复；完成后重启 dsh 生效，可发 /dev_plugin_status 验证注入器 active。"
+    fixNote: "由两个子模块组成（dsh-super-injector + dsh-router-standard）。安装自动完成：注入器 lib 预构建 → preset 双布局安装（preset/<name> 新布局 / preset/preset/<name> 旧布局兼容）→ dsh 0.1.3 Session API 兼容层落盘（裸读 session.events 的旧代码自动打补丁）→ preset.yml 引号修复；完成后重启 dsh 生效，可发 /dev_plugin_status 验证注入器 active。"
   },
   {
     key: "better-sidebar",
@@ -405,6 +405,226 @@ export async function toggle(ctx, bundle, disable) {
   return { ok: true };
 }
 
+/* ------------- routing-suite 预设安装：双布局探测 + dsh 0.1.3 Session API 兼容 ------------- */
+
+export const PRESET_NAMES = ["router-standard", "router-spec"];
+
+/** 预设源码候选目录（上游演进：preset/<name> 新布局 → preset/preset/<name> 旧布局 → 仓库根 <name>） */
+export function presetSrcCandidates(suite, name) {
+  return [
+    path.join(suite, "preset", name),
+    path.join(suite, "preset", "preset", name),
+    path.join(suite, name)
+  ];
+}
+
+/** 探测某预设源码目录：须含 agent.cordis.yml 才认可；找不到返回 null */
+export function resolvePresetSrc(suite, name) {
+  for (const cand of presetSrcCandidates(suite, name)) {
+    if (existsSync(path.join(cand, "agent.cordis.yml"))) return cand;
+  }
+  return null;
+}
+
+/** 注入到旧预设模块中的兼容读取函数：dsh 0.1.3 起 Session 不再暴露 .events 数组属性 */
+const SESSION_EVENTS_HELPER = `// dsh-launcher 兼容层（dsh 0.1.3 Session API 变更）
+// Session.events 数组属性已移除（事件为私有 append-only log），读取走 snapshotEvents()/ownEvents()；
+// 取值优先级：1) 旧版 .events 数组  2) 新版 snapshotEvents()（完整日志，保留 resume 语义）
+//            3) 过渡 ownEvents()   4) 兜底 []（不再抛错，路由回退 weak）
+export function sessionEvents(session) {
+  if (!session || typeof session !== 'object') return []
+  if (Array.isArray(session.events)) return session.events
+  if (typeof session.snapshotEvents === 'function') {
+    try { return session.snapshotEvents() } catch { /* 落到 ownEvents */ }
+  }
+  if (typeof session.ownEvents === 'function') {
+    try { return session.ownEvents() } catch { /* 兜底 */ }
+  }
+  return []
+}
+`;
+
+function isCommentLine(line) {
+  const t = line.trimStart();
+  return t.startsWith("//") || t.startsWith("*");
+}
+
+/** 定位文件内已有 sessionEvents 函数定义的行区间：这些行内的 .events 读属合法实现，不得改写 */
+function sessionEventsDefRanges(lines) {
+  const ranges = [];
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i];
+    const isDef =
+      /^\s*(export\s+)?(async\s+)?function\s+sessionEvents\b/.test(t) ||
+      /^\s*(export\s+)?(async\s+)?const\s+sessionEvents\s*=/.test(t);
+    if (!isDef) continue;
+    let depth = 0;
+    let j = i;
+    for (; j < lines.length; j++) {
+      for (const ch of lines[j]) {
+        if (ch === "{") depth++;
+        else if (ch === "}") depth--;
+      }
+      if (depth === 0) break;
+    }
+    ranges.push([i, Math.min(j, lines.length - 1)]);
+    i = j;
+  }
+  return ranges;
+}
+
+/** 文件级「危险裸读」判定：存在 session.events 且非 || / ?? 守卫形态、非 sessionEvents 自身实现、非注释行 */
+export function hasBareSessionEvents(src) {
+  const lines = src.split(/\r?\n/);
+  const defRanges = sessionEventsDefRanges(lines);
+  for (let i = 0; i < lines.length; i++) {
+    if (defRanges.some(([a, b]) => i >= a && i <= b)) continue;
+    const line = lines[i];
+    if (isCommentLine(line)) continue;
+    const re = /\bsession\.events/g;
+    let m;
+    while ((m = re.exec(line))) {
+      const rest = line.slice(m.index + m[0].length).replace(/^\s+/, "");
+      if (rest.startsWith("||") || rest.startsWith("??")) continue; // 守卫形态：session.events || [] / ?? []
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 把兼容读取函数插到 import 块之后（无 import 则放文件头），保持 imports-first 可读性 */
+function injectSessionEventsHelper(src) {
+  const importRe = /import[\s\S]*?from\s*['"][^'"]+['"]\s*;?/g;
+  let end = -1;
+  let m;
+  while ((m = importRe.exec(src))) end = m.index + m[0].length;
+  if (end === -1) return `${SESSION_EVENTS_HELPER}\n${src}`;
+  return `${src.slice(0, end)}\n\n${SESSION_EVENTS_HELPER}${src.slice(end)}`;
+}
+
+/** 行内是否存在危险裸读（非 || / ?? 守卫形态） */
+function lineHasDangerousSessionEvents(line) {
+  const re = /\bsession\.events/g;
+  let m;
+  while ((m = re.exec(line))) {
+    const rest = line.slice(m.index + m[0].length).replace(/^\s+/, "");
+    if (!rest.startsWith("||") && !rest.startsWith("??")) return true;
+  }
+  return false;
+}
+
+/** 单文件改写：缺失则注入 sessionEvents，并把「危险裸读行」的 session.events → sessionEvents(session) */
+export function rewriteBareSessionEvents(src) {
+  let out = src;
+  if (!/\bsessionEvents\b/.test(out)) out = injectSessionEventsHelper(out);
+  const nl = out.includes("\r\n") ? "\r\n" : "\n";
+  const origLines = out.split(/\r?\n/);
+  const defRanges = sessionEventsDefRanges(origLines);
+  const lines = origLines.map((line, idx) => {
+    if (defRanges.some(([a, b]) => idx >= a && idx <= b)) return line; // sessionEvents 自身实现不动
+    if (isCommentLine(line)) return line;
+    if (!lineHasDangerousSessionEvents(line)) return line; // 守卫/无关行不动
+    return line.replace(/(^|[^A-Za-z0-9_$])session\.events/g, "$1sessionEvents(session)");
+  });
+  return lines.join(nl);
+}
+
+/**
+ * 对已落盘的预设目录做 0.1.3 兼容审计与补丁：
+ * - 扫描全部 *.mjs；发现裸读 session.events 的文件 → 注入 sessionEvents 并改写调用点
+ * - 每个改写文件用 kit node --check 校验语法，失败自动回滚该文件
+ * @returns {{patched: string[], rolledBack: string[]}}
+ */
+export function ensurePresetCompat(dir, { nodeExe = null, log = () => {} } = {}) {
+  const patched = [];
+  const rolledBack = [];
+  let files = [];
+  try { files = readdirSync(dir).filter((f) => f.endsWith(".mjs")); } catch { return { patched, rolledBack }; }
+  for (const f of files) {
+    const p = path.join(dir, f);
+    let src;
+    try { src = readFileSync(p, "utf8"); } catch { continue; }
+    if (!hasBareSessionEvents(src)) continue;
+    const out = rewriteBareSessionEvents(src);
+    if (out === src) continue;
+    writeFileSync(p, out, "utf8");
+    if (nodeExe) {
+      // stdio 全 ignore：沙箱/受限环境 spawn 管道会被 EPERM 拒绝，且只需退出码判定
+      let chk;
+      try {
+        chk = spawnSync(nodeExe, ["--check", p], { windowsHide: true, timeout: 30000, stdio: ["ignore", "ignore", "ignore"] });
+      } catch (e) {
+        chk = { error: e };
+      }
+      if (chk.error) {
+        log(`[plugin] ⚠ ${f} 无法运行 node --check（${chk.error?.message ?? "spawn 失败"}），保留补丁待重启验证`);
+      } else if (chk.status !== 0) {
+        writeFileSync(p, src, "utf8");
+        rolledBack.push(f);
+        log(`[plugin] ⚠ ${f} 兼容补丁语法校验失败（exit ${chk.status}），已回滚`);
+        continue;
+      }
+    }
+    patched.push(f);
+  }
+  return { patched, rolledBack };
+}
+
+/**
+ * 从已克隆的 routing-suite 源码目录安装预设（纯同步、可独立测试；不做 git/网络操作）。
+ * - 布局探测：preset/<name> → preset/preset/<name> → <name>
+ * - 覆盖前把旧预设备份到 presetRoot/.patch-backup-<ts>/（仅保留最近 3 份）
+ * - 落盘后自动跑 0.1.3 兼容补丁 + preset.yml 引号修复
+ * @param {object} [opts] { nodeExe: string|null }
+ * @returns {{ok: boolean, installed: number, expected: number, skipped: string[], error?: string}}
+ */
+export function installPresets(suiteDir, presetRoot, log = () => {}, opts = {}) {
+  if (!existsSync(suiteDir)) {
+    return { ok: false, installed: 0, expected: PRESET_NAMES.length, skipped: [...PRESET_NAMES], error: `套件源码目录不存在: ${suiteDir}` };
+  }
+  try { mkdirSync(presetRoot, { recursive: true }); } catch (e) {
+    return { ok: false, installed: 0, expected: PRESET_NAMES.length, skipped: [...PRESET_NAMES], error: `无法创建预设目录: ${e?.message ?? e}` };
+  }
+  const backupDir = path.join(presetRoot, `.patch-backup-${Date.now()}`);
+  let installed = 0;
+  const skipped = [];
+  for (const name of PRESET_NAMES) {
+    const src = resolvePresetSrc(suiteDir, name);
+    const dst = path.join(presetRoot, name);
+    if (!src) {
+      log(`[plugin] ⚠ 预设 ${name} 未找到（候选: preset/${name}、preset/preset/${name}、<suite>/${name}），已跳过`);
+      skipped.push(name);
+      continue;
+    }
+    // 旧预设整体备份（保留手动补丁/旧版本可回退），再全新落盘
+    if (existsSync(dst)) {
+      try {
+        const bk = path.join(backupDir, name);
+        cpSync(dst, bk, { recursive: true });
+      } catch { /* 备份失败不阻断安装 */ }
+    }
+    rmSync(dst, { recursive: true, force: true });
+    cpSync(src, dst, { recursive: true });
+    const fixed = fixPresetYaml(path.join(dst, "preset.yml"));
+    const { patched, rolledBack } = ensurePresetCompat(dst, { nodeExe: opts.nodeExe ?? null, log });
+    const note = patched.length
+      ? `已自动应用 dsh 0.1.3 Session API 兼容层（${patched.length} 个文件${rolledBack.length ? `，${rolledBack.length} 个回滚` : ""}）`
+      : "0.1.3 兼容审计通过";
+    log(`[plugin] 已安装预设 ${name} → ${dst}（${note}）${fixed ? "（已修复 preset.yml 描述引号）" : ""}`);
+    installed++;
+  }
+  // 清理旧备份：仅保留最近 3 份 .patch-backup-*
+  try {
+    const dirs = readdirSync(presetRoot)
+      .filter((d) => d.startsWith(".patch-backup-"))
+      .map((d) => path.join(presetRoot, d))
+      .filter(statIsDir)
+      .sort((a, b) => (a < b ? 1 : -1));
+    for (const old of dirs.slice(3)) rmSync(old, { recursive: true, force: true });
+  } catch { /* 忽略清理失败 */ }
+  return { ok: true, installed, expected: PRESET_NAMES.length, skipped };
+}
+
 /** 特殊插件：dsh-routing-suite（注入器 + 路由预设 + 二次修复） */
 export async function installRoutingSuite(ctx) {
   const home = ctx.cfg.dshHome ?? path.join(os.homedir(), ".dsh");
@@ -443,29 +663,17 @@ export async function installRoutingSuite(ctx) {
   if (r.code !== 0) return { ok: false, error: "注入器装配失败" };
   ctx.pushLog("[plugin] 注入器已装配（重启后由 bundles 接管）");
 
-  // 3) 克隆套件（含子模块）+ 平铺安装预设
+  // 3) 克隆套件（含子模块）→ 平铺安装预设（双布局探测 + 0.1.3 兼容补丁自动落盘）
   const suite = path.join(os.tmpdir(), `dsh-routing-suite-${Date.now()}`);
   ctx.pushLog("[plugin] 克隆 routing-suite（含 submodule）…");
   r = await ctx.runStream("git", ["clone", "--depth", "1", "--recurse-submodules", ROUTING_SUITE_URL, suite]);
   if (r.code !== 0) return { ok: false, error: "套件克隆失败（可能网络或子模块问题）" };
-  await mkdir(presetRoot, { recursive: true });
-  let installedPresets = 0;
-  for (const p of ["router-standard", "router-spec"]) {
-    const src = path.join(suite, "preset", "preset", p);
-    const dst = path.join(presetRoot, p);
-    if (!existsSync(path.join(src, "agent.cordis.yml"))) {
-      ctx.pushLog(`[plugin] ⚠ 预设 ${p} 结构异常（缺少 agent.cordis.yml），已跳过`);
-      continue;
-    }
-    rmSync(dst, { recursive: true, force: true });
-    cpSync(src, dst, { recursive: true });
-    const fixed = fixPresetYaml(path.join(dst, "preset.yml"));
-    ctx.pushLog(`[plugin] 已安装预设 ${p} → ${dst}${fixed ? "（已修复 preset.yml 描述引号）" : ""}`);
-    installedPresets++;
-  }
+  const presetResult = installPresets(suite, presetRoot, (line) => ctx.pushLog(line), { nodeExe: ctx.kitNodeExe() });
   rmSync(suite, { recursive: true, force: true });
+  if (!presetResult.ok) return { ok: false, error: presetResult.error };
 
-  ctx.pushLog(`[plugin] ══ routing-suite 安装完成（注入器 + ${installedPresets}/2 预设）══`);
+  const { installed, expected } = presetResult;
+  ctx.pushLog(`[plugin] ══ routing-suite 安装完成（注入器 + ${installed}/${expected} 预设）══`);
   ctx.pushLog("[plugin] 重启 dsh 后生效：新会话可选 Router Standard / Router Spec；可发 /dev_plugin_status 验证注入器 active");
-  return { ok: true, installedPresets };
+  return { ok: true, installedPresets: installed };
 }

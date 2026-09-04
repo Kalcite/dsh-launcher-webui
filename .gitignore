@@ -10,3 +10,9 @@ __pycache__/
 # 个人配置（含本机绝对路径），不推送；仓库提供 config.example.json 模板
 config.json
 .dshctl/
+
+# 备用端/测试端：固定版本 dsh clone + 独立用户目录 + 上游对照 clone（不随启动器更新、不入库）
+.dsh_temp/
+
+# 本地 Claude/agent 设置（权限等），不推送
+.claude/

@@ -1,6 +1,7 @@
 export type ServerStatus = {
   running: boolean;
   httpOk: boolean;
+  httpCode: number | null;
   port: number;
   profile: string | null;
   pid: number | null;
@@ -10,6 +11,43 @@ export type ServerStatus = {
   logSize: number;
   logSeq: number;
   busy: boolean;
+  /** 备用端摘要（后端 v0.8.0+；旧后端为 undefined） */
+  standby?: StandbySummary;
+};
+
+/** 备用端摘要（随 /api/status 轻量下发，供概览即时显示） */
+export type StandbySummary = {
+  deployed: boolean;
+  distOk: boolean;
+  provisioned: boolean;
+  running: boolean;
+  port: number;
+  tag: string;
+  root: string;
+  home: string;
+  busy: boolean;
+};
+
+/** 备用端完整状态（/api/standby/status） */
+export type StandbyStatus = StandbySummary & {
+  httpOk: boolean;
+  httpCode: number | null;
+  pid: number | null;
+  owned: boolean;
+  profile: string;
+  binPath: string;
+  webDist: string;
+  consoleLog: string;
+  webUrl: string;
+  /** 目录/相关文件检测结果（v0.8.x 后端） */
+  dir?: {
+    dirExists: boolean;
+    gitRepo: boolean;
+    hasPkg: boolean;
+    hasEntry: boolean;
+    hasDeps: boolean;
+    state: "absent" | "empty" | "git-repo" | "dsh-source" | "foreign-files";
+  };
 };
 
 export type EnvInfo = {
@@ -127,7 +165,7 @@ export type SseMsg =
   | { type: "event"; event: EventRecord }
   | { type: "status"; status: ServerStatus }
   | { type: "refresh" }
-  | { type: "deploy"; ok: boolean; target?: string; error?: string }
+  | { type: "deploy"; ok: boolean; target?: string; error?: string; mode?: string }
   | { type: "fatal"; kind: "update" | "plugin" | "server"; message: string; recoverable: boolean };
 
 async function j<T>(res: Response): Promise<T> {
@@ -142,12 +180,17 @@ export const api = {
     fetch(`/api/logs?tail=${tail}`).then((r) => j<{ lines: LogEntry[]; nextSeq: number }>(r)),
   action: (a: "start" | "stop" | "restart") =>
     fetch(`/api/server/${a}`, { method: "POST" }).then((r) => j<{ ok: boolean; error?: string }>(r)),
-  open: (target: "web" | "folder" | "vscode" | "logs") =>
+  open: (target: "web" | "folder" | "vscode" | "logs" | "standbyWeb" | "standbyFolder" | "standbyLogs") =>
     fetch("/api/open", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target })
     }).then((r) => j<{ ok: boolean }>(r)),
+  standbyStatus: () => fetch("/api/standby/status").then((r) => j<StandbyStatus>(r)),
+  standbyAction: (a: "bootstrap" | "provision" | "start" | "stop" | "restart") =>
+    fetch(`/api/standby/${a}`, { method: "POST" }).then((r) =>
+      j<{ ok: boolean; started?: boolean; already?: boolean; error?: string; standby?: { port: number; url: string } }>(r)
+    ),
   /** 打开 Windows 原生文件夹选择对话框，返回所选路径（取消时 path 为 null） */
   pickDir: () =>
     fetch("/api/pick-dir", { method: "POST" }).then((r) => j<{ ok: boolean; path?: string | null }>(r)),

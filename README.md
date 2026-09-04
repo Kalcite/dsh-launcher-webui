@@ -138,6 +138,10 @@ client-modules: bundle script /plugins/@deepseek-ai/dsh-typert-registry/client.j
 | `webPort` | `3080` | dsh Web UI 端口（启停目标） |
 | `launcherPort` | `5177` | 启动器自身端口 |
 | `profile` | `null` | 启动 dsh 的 profile（null = web） |
+| `standbyRoot` | `.dsh_temp/dsh` | 备用 dsh 本体目录（相对套件根或绝对路径） |
+| `standbyHome` | `.dsh_temp/.dsh` | 备用端独立 DSH_HOME（相对套件根或绝对路径，支持 `~`） |
+| `standbyWebPort` | `3090` | 备用 dsh Web UI 端口（固定默认，可改；重启启动器生效） |
+| `standbyTag` | `dsh-v0.1.3-alpha.1` | 备用端固定版本（最稳定组合登记值） |
 | `openBrowser` | `false` | 后端启动时自动开浏览器 |
 
 优先级：`config.json` < 环境变量（`DSH_ROOT` / `DSH_WEB_PORT` / `DSH_LAUNCHER_PORT` / `DSH_PROFILE` / `DSH_OPEN_BROWSER`）< CLI 参数（`--dsh-root` / `--dsh-home` / `--web-port` / `--port` / `--profile` / `--open`）。UI 内「切换 dshRoot」「数据目录 DSH_HOME」与部署/更新完成会自动持久化配置。
@@ -157,22 +161,106 @@ dsh 的所有用户数据（**profile / 插件 / 会话 / 凭据 / 预设 / 附�
 - 切换后**必须重启 dsh 服务器**生效；`tools\plugin.cmd` 同样跟随（读 config.json 的 dshHome）
 - 注：DSH_HOME 只作用于服务端，不会泄漏到浏览器端（dsh 官方明确剔除）
 
+## 备用服务器（.dsh_temp）——固定版本 + 独立 DSH_HOME
+
+> 主端（`dshRoot`）是用户自选目录（如 `G:\dsh`，可切换/自定义）；**备用端**固定版本、独立用户目录，二者完全隔离。
+
+### 用途
+
+- **版本守护**：备用端固定在最稳定组合登记版本 **dsh `dsh-v0.1.3-alpha.1`（d347e70）**，不随主端/启动器更新。主端升级或插件事故后无法启动时，启动备用端（默认端口 **3090**）→ 打开备用 UI 新建会话 → 让智能体按内置 `dsh-operations` skill 诊断并修复主端（vibecoding 式自愈）。
+- **测试端**：`.dsh_temp/upstream/` 为 dsh-routing-suite 上游对照 clone；预设改动先用 `compat-test/run.mjs`（离线回归）验证。
+
+### 目录与数据
+
+```
+G:\dsh-launcher\.dsh_temp\        ← 整体 gitignore，不随启动器更新分发
+├── dsh\                          备用 dsh 本体（固定 tag clone + node_modules/dist）
+├── .dsh\                         备用端独立 DSH_HOME（profiles/plugins/.agent-presets/skills）
+│   ├── plugins\dsh-super-injector + profiles\web（router 注入器装配）
+│   ├── .agent-presets\router-standard|router-spec（含 0.1.3 兼容层，v0.7.7+ 安装逻辑）
+│   ├── skills\dsh-operations\SKILL.md（运维 skill，user-dsh 根自动加载）
+│   └── （better-sidebar@0.18.0 随 profile 安装）
+├── upstream\                      routing-suite 对照 clone（可删）
+└── compat-test\                   离线回归测试（可删）
+```
+
+用户目录初始化只装 **router（注入器+预设）与 better-sidebar**，其余一律不带——备用端保持干净、可预测。
+
+### 使用（UI 或 API）
+
+| 动作 | UI（管理 dsh → 备用服务器，默认折叠） | API |
+|---|---|---|
+| 查看状态 | 卡片摘要（随 3s 轮询） | `GET /api/standby/status`（完整） |
+| 部署（自动检测目录与文件 → clone 固定 tag 或同步 → install → build → build:web） | 折叠区「部署备用端（自动检测目录）」/「重新部署/同步」 | `POST /api/standby/bootstrap` |
+| 初始化用户目录（router+sidebar+skill） | 「初始化用户目录」 | `POST /api/standby/provision` |
+| 启动 / 停止 / 重启（独立端口 3090、`DSH_HOME`=备用 .dsh） | 折叠区按钮 | `POST /api/standby/start|stop|restart` |
+| 打开 备用 UI / 本体目录 / 备用日志 | 快捷按钮 | `POST /api/open {target:"standbyWeb"|"standbyFolder"|"standbyLogs"}` |
+
+- 部署/初始化进度走日志面板（SSE `deploy action=standby`）；备用端异常退出只记录日志并刷新，**不弹主端致命窗**、不触碰主 dsh 与 `config.dshRoot`。
+- 备用端配置键：`standbyRoot`（默认 `.dsh_temp/dsh`）、`standbyHome`（默认 `.dsh_temp/.dsh`，支持绝对路径）、`standbyWebPort`（固定默认 3090，与主 `webPort` 解耦）、`standbyTag`（默认 `dsh-v0.1.3-alpha.1`）。
+- **部署约束**：备用端目录 `.dsh_temp/` 整体 gitignore——**不提交仓库、不随启动器更新**；本机与新设备都要在「管理 dsh → 备用服务器（默认折叠）」按与正常部署相同的流程**手动部署**（克隆固定版本 → 构建 → 初始化用户目录）。
+- **折叠区部署按钮（自动检测）**：部署由折叠区内「部署备用端」按钮触发，后端先检测备用本体目录（默认 `.dsh_temp/dsh`）与关键文件再决定：空/缺失 → 全新克隆固定版本；已是 git 仓库 → 同步固定版本并重建；**非空且非 git**（dsh 源码或残留）→ 拒绝覆盖并提示清理/改 `standbyRoot`。已部署后可点「重新部署/同步」走同一检测逻辑。折叠区展示「目录检测」结果行。
+
+### 跨设备部署同版本（备用端）
+
+1. 新机器先部署 dsh-launcher（`setup.cmd`）；
+2. UI「管理 dsh → 备用服务器（默认折叠）→ 部署备用端（固定版本）」按与正常部署同流程执行 clone + 构建；「初始化用户目录」装好 router/sidebar 并把 `skills/dsh-operations` 复制进独立 `.dsh`；
+3. 离线时手动：clone 同 tag 到 `.dsh_temp/dsh` → `pnpm install && pnpm run build && pnpm run build:web` → 设 `DSH_HOME` 指向独立 `.dsh` 后按「插件管理」补 router（注入器+预设）与 sidebar。
+
+### 快速上手（备用端，约 10 分钟）
+
+1. **部署备用端**（管理 dsh → 备用服务器，默认折叠 →「部署备用端（自动检测目录）」）：按钮先自动检测 `.dsh_temp/dsh` 目录与关键文件——空/缺失 → `git clone --depth 1 --branch dsh-v0.1.3-alpha.1`；已是 git 仓库 → fetch tag + 同步 → `pnpm install` → `pnpm run build` → `build:web`（与「一键部署 dsh」同一引擎，进度走底部日志面板；`/api/standby/status` 的 `deployed/distOk` 变 true 即完成）。
+2. **初始化用户目录**（「初始化用户目录」）：自动完成 注入器装配 + router 预设落盘（含 v0.7.7+ 的 0.1.3 兼容层）+ `dsh-better-sidebar@0.18.0` + 把运维 skill 复制进独立 `.dsh/skills/dsh-operations`。首次失败会自动「启动一次再重试」。
+3. **启动备用端**（端口默认 3090）→「打开备用 UI」：按钮会从备用 console 日志自动带上 `?token=`（无 token 时 dsh 根路径 401，属正常鉴权）。
+4. 用完「停止」即可；备用端与主端**零共享**（DSH_HOME 独立、config 不切换、进程树独立）。
+
+### skill `dsh-operations` 使用方法（人 / 智能体）
+
+- **仓库内**：`.agents/skills/dsh-operations/SKILL.md`——工作目录在 dsh-launcher 的会话自动进入 skill 目录（`<projectRoot>/.agents/skills`）；任何人可直接读该文件照做。
+- **备用端**：初始化用户目录时已复制到独立 `.dsh` 的 `skills/`（user-dsh skill 根），备用端会话自动可加载。
+- **怎么用**：在 dsh GUI 会话里说一句「加载 dsh-operations skill，按故障库定位并修复…」，或直接提问该 skill 覆盖的问题（启动即退、Router 崩溃、探活、更新/插件事故、备用端切换等）；修复主 dsh 的标准流程见 skill 第 4 节。
+- **要点**：先只读取证（`/api/logs`、`server.console.log`、`/api/status`、`/api/plugins`）再动手；任何会重启 3080 主 dsh 的操作先征求用户同意。
+
+### 备用端 FAQ
+
+| 问题 | 处理 |
+|---|---|
+| 备用端起不来：端口被占 | `netstat -ano \| findstr :3090` 释放，或 config 改 `standbyWebPort`（重启启动器生效） |
+| 「初始化用户目录」提示 profile 未初始化 | 先「启动备用端」一次让其生成 profiles/storages 骨架 → 停止 → 再初始化（UI 会自动重试一次） |
+| 打开备用 UI 只见 401/JSON | 属正常鉴权：用「打开备用日志」从 `server.console.log` 复制 `?token=` 完整地址，或直接点「打开备用 UI」（v0.8.0+ 自动带 token） |
+| 主端修好后如何收尾 | 「停止」备用端即可；数据保留在 `.dsh_temp/.dsh`，随时再启 |
+
+## 用量分析（数据格式与版本适配）
+
+- **数据源**：`DSH_HOME/sessions/<project>/<sid>/` 下的会话日志，zstd 多帧解压（或明文 jsonl）。
+- **v0.8.x 适配 dsh 0.1.3-alpha.1 的双日志格式**：
+  - v0 流式日志 `session.jsonl.zstd`：token 记账在 `assistant/chunk` 行的 `data.chunk.usage`（chunk.type=`usage`）；
+  - v2 持久日志 `session.v2.jsonl.zstd`（新会话/已迁移会话）：token 记账在 `assistant/message` 行的 `data.usage`；
+  - **同一会话自动取最高版本文件**（v2 覆盖 v0/v1 残余），避免新旧重复计数；`session.migration.*.tmp` 与生成计数文件（如 `session.9.v2.jsonl`）一律忽略。
+- **字段**：`inputTokens / outputTokens / cacheReadTokens`（`reasoningTokens` 仅存档、不计费）；模型归属取最近一次 `request/header` 的 `data.header.config.model`。
+- **计费**：多模型单价表 + 峰谷时段 + 周末规则全部可在「用量分析」页自定义（`GET/POST /api/usage/pricing`），默认官方 DeepSeek 定价。
+- **已知口径**：v1/v2 并存且 v1 时间戳更早属正常（迁移冻结），统计以最高版本文件为准；切换 DSH_HOME 后需刷新页面。
+
 ## API（127.0.0.1:5177）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/status` | 服务器状态（端口监听 + HTTP 探活 + 进程/PID + busy） |
+| GET | `/api/status` | 服务器状态（端口监听 + HTTP 探活 + 进程/PID + busy；`httpCode`；`standby` 摘要） |
 | GET | `/api/env` | 工具链版本（node/pnpm/git/便携 Node）与部署路径 |
 | GET | `/api/logs?tail=N` / `?since=<seq>` | 日志（环形缓冲，SSE 同源） |
 | GET | `/api/events` | SSE：`log` / `status` / `refresh` / `deploy`（部署与更新共用，带 `action`） |
 | POST | `/api/server/start` `/stop` `/restart` | dsh 服务器生命周期（taskkill 进程树 + 端口兜底） |
+| GET | `/api/standby/status` | 备用服务器状态（部署/初始化/运行/HTTP 码 + 路径端口） |
+| POST | `/api/standby/bootstrap` | 部署备用端（clone 固定 tag `dsh-v0.1.3-alpha.1` + install + build，SSE 进度） |
+| POST | `/api/standby/provision` | 初始化备用端独立用户目录（router + sidebar@0.18 + 运维 skill） |
+| POST | `/api/standby/start` `/stop` `/restart` | 备用服务器生命周期（独立端口 3090 + DSH_HOME，不触发主端致命弹窗） |
 | GET | `/api/deploy/status?dir=` | 目录部署状态（git/依赖/构建/版本/入口） |
 | POST | `/api/deploy` `{targetDir, skipBuild}` | 一键部署（异步，SSE 推进度，成功自动切换 dshRoot） |
 | GET | `/api/update/check` | 更新检查：本地版本信息 + GitHub Releases（含更新内容）+ 客户端 bundle 健康 |
 | POST | `/api/update/apply` `{version?, skipBuild?}` | 版本选择更新（默认最新 master；自动停服 + clean 全量重建 + 校验） |
 | POST | `/api/update/repair` | 修复客户端构建（clean + install + build + 校验，不碰 git） |
 | POST | `/api/config` `{dshRoot, dshHome, webPort, ...}` | 更新并持久化配置（dshHome 支持 null=默认 / `~` 展开 / 相对 dshRoot） |
-| POST | `/api/open` `{target: web\|folder\|vscode}` | 打开 Web UI / 仓库目录 / VSCode |
+| POST | `/api/open` `{target: web\|folder\|vscode\|logs\|standbyWeb\|standbyFolder\|standbyLogs}` | 打开 Web UI / 仓库目录 / VSCode / 日志 / 备用 UI / 备用本体目录 / 备用日志 |
 
 ## Python 工具（tools\）
 
@@ -200,6 +288,10 @@ tools\plugin.cmd enable <bundle>
 | "bundle script ... failed to load" | 「更新 dsh」页 → 修复客户端构建 → 重启服务器 → 浏览器硬刷新（详见上文修复章节） |
 | 浏览器显示旧界面 | 硬刷新 Ctrl+Shift+R（rev 为缓存戳，新页面自动带新 rev） |
 | 更新后插件不生效 | 插件在 `~\.dsh\profiles\web`（用户层），与仓库版本独立；`tools\plugin.cmd` 管理 |
+| 更新 dsh 到 0.1.3-alpha.1 后，新会话报 `本轮运行失败 Cannot read properties of undefined (reading 'find')` | Router 预设还在裸读已被新版 dsh 移除的 `session.events` 属性 → 已按下方「故障记录 2026-09-04」章节做本地兼容补丁，重启 dsh 后验证 |
+| 更新 dsh 后**启动即退 code=1**（日志含 `@deepseek-ai/dsh-settings` 不提供 `settingsNamespace`） | 旧版 dsh-better-sidebar 不兼容 0.1.3-alpha.1 → 更新插件 ≥0.18.0 / 临时禁用；详见「故障记录 2026-09-04（续）」 |
+| 服务其实健康但 UI 显示"启动中…"/探活红 | 旧探活只认 HTTP 200，而 dsh web 根路径带 token 鉴权返回 401 → v0.8.0 已改为任意 HTTP 响应即在线（`httpCode` 显示） |
+| 主端升级/插件事故无法启动 | 「管理 dsh → 备用服务器（默认折叠）」：部署/启动固定版本备用端（端口 3090）→ 打开备用 UI 让智能体按内置 skill 修复主端（vibecoding 式自愈） |
 
 ## 事件管理器（「事件管理器」页）
 
@@ -225,195 +317,92 @@ tools\plugin.cmd enable <bundle>
   3. 重启 `launcher.cmd` 时自动检测标记 → `pnpm install` 收尾 → 清除标记 → 正常启动
   - 全程**不杀死当前进程**、不产生致命错误；更新失败仅记录错误事件
 
+## 故障记录 2026-09-04：dsh 0.1.3-alpha.1 更新后 Router 预设崩溃（reading 'find'）
+
+> 定位 + 本地修复已落地（改的是 `~\.dsh` 数据层预设，**未改本仓库代码/上游**）。补丁在磁盘，dsh 服务器已停，**待重启验证**。
+
+### 现象
+
+- 用启动器把 dsh「更新」到 master（**实际为全新 clone** → `@deepseek-ai/dsh-root 0.1.3-alpha.1`，commit `d347e70`）后，任何选中 **Router Standard / Router Spec** 预设的新会话首轮即失败。
+- dsh web UI 顶部显示：`本轮运行失败 Cannot read properties of undefined (reading 'find')`（即 `message.turnError`）。
+- 该崩溃**与注入器是否启用无关**：即使 `@dsh-external/dsh-super-injector` 在 profile web 被 `disabled: true`，预设代码独立运行仍崩。
+
+### 根因（已实证）
+
+1. **dsh 0.1.3 Session 事件 API 变更**：新 `Session` 类不再暴露 `.events` 数组属性（`packages/core/session/src/index.ts`），事件改为私有 append-only log，读取走 `snapshotEvents()/ownEvents()/eventAt()` + surface 投影。旧代码读 `session.events` 恒为 `undefined`。
+2. **routing-suite 预设仍裸读 `.events`**（`~/.dsh/.agent-presets/router-*`，2026-08-18 由启动器安装的旧代码）：
+   - `router-core.mjs` → `sessionMode()`：`const events = session.events; events.find(...)` → 对 `undefined.find` 抛 TypeError（**就是报错来源**）。
+   - `router-bootstrap-v1.mjs` → 装配钩子 `session.events.some(...)` 同类。
+3. **触发时机** = 新会话首次 `system-prompt/assemble`：此时 `firstUserText` 尚未捕获，代码回退 `sessionMode(session)`（bootstrap 的 issue #3 修复分支，见注释）→ 抛错 → 整轮失败。
+4. **为什么预设没跟上**：
+   - 2026-09-04 曾重装 routing-suite，但上游仓库布局已从 `preset/preset/<name>` 改为 `preset/<name>`，本启动器 [server/plugins.mjs](server/plugins.mjs#L447) 安装路径不匹配 → 日志 `⚠ 预设 router-standard/router-spec 结构异常（缺少 agent.cordis.yml）→ 已跳过`，结果 `注入器 + 0/2 预设`，旧代码原样保留。
+   - 上游 master（用 `.dsh_temp` 临时 clone 对比）：`preset/router-standard`（v34）已加 `session.events || []` 防护；**`preset/router-spec`（v10）仍裸写 `session.events.find`** —— 上游也未完全适配 0.1.3，只靠重装上游解决不了 spec。
+   - 注入器 Release 预构建（`dsh-super-injector` 0.3.3）仍停留于「按 dsh 0.1.0-rc.6 语义」时期。
+
+### 修复内容（本地补丁）
+
+- **范围**：`~/.dsh/.agent-presets/router-standard` 与 `router-spec`（两目录原文件字节级一致，改动同步到三个文件）。
+- **`router-core.mjs`**：新增并导出 `sessionEvents(session)` 兼容读取函数，`sessionMode()` 改用它。取值优先级：
+  1. 新版 dsh：`session.snapshotEvents()`（完整日志，**保留 resume 语义**）；
+  2. 旧版：`session.events` 数组；
+  3. 过渡：`session.ownEvents()`；
+  4. 兜底 `[]`（不再抛错，回退 weak 路由）。
+- **`router-bootstrap-v1.mjs`**（及等同副本 `router-bootstrap.mjs`）：导入 `sessionEvents`，把会崩的 `session.events.some(...)` 改为 `sessionEvents(session).some(...)`。
+- **备份**：改动前原文件已存 `~/.dsh/.agent-presets/.patch-backup-20260904/`（回退/对照用）。
+- **验证**：`node --check` 语法全过；冒烟测试——新版 Session（仅 `snapshotEvents`）路由分类正常、旧版 `.events` 正常、空/无事件 Session 返回 `weak` 不崩。
+- **生效**：重启 dsh 服务器后加载新模块（已执行停止，端口 3080 已释放，待从启动器重新启动验证）。
+
+### 待办 / 后续建议
+
+- [x] 重启 dsh → 新建 Router Spec/Standard 会话，确认不再出现「本轮运行失败」（2026-09-04 晚已重启，补丁进程生效；会话级验证由用户在 GUI 完成）。
+- [x] **v0.7.7 根因修复**：本启动器 [server/plugins.mjs](server/plugins.mjs) 预设安装逻辑适配上游新布局 `preset/<name>`（兼容旧 `preset/preset/<name>`），重装 routing-suite 不再 0/2 跳过：
+  - 落盘后自动做 **dsh 0.1.3 Session API 兼容审计**：发现仍裸读 `session.events` 的文件（含上游未适配的旧副本）→ 自动注入 `sessionEvents()` 兼容读取（`.events` → `snapshotEvents()` → `ownEvents()` → `[]`）并改写调用点；每个改写文件经 `node --check` 校验，失败自动回滚；
+  - 上游已适配代码（router-standard v34 / router-spec v10 装载链）逐字节保持不动；
+  - 覆盖旧预设前整体备份到 `.patch-backup-<ts>/`（保留最近 3 份），手动补丁/旧版本可回退。
+- 上游 router-spec 装载链（v10）已按 0.1.3 适配；若上游后续再带回未适配代码，本启动器安装时会自动补丁兜底。
+- 本机 `.dsh_temp` 已升级为**备用服务器 + 测试端**（见下「备用服务器（.dsh_temp）」章节）：`dsh/` 固定版本本体 + `.dsh/` 独立用户目录 + `upstream/` routing-suite 对照 clone；整体 gitignore、不随启动器更新。
+
+## 故障记录 2026-09-04（续）：dsh 0.1.3-alpha.1 更新后「启动即退 code=1」——better-sidebar 兼容性（已实证 + 组合登记）
+
+> 登记版本组合：**launcher 0.7.7/0.8.0 ↔ dsh `dsh-v0.1.3-alpha.1`（commit `d347e70`）↔ 插件仅 router 相关 + `dsh-better-sidebar@≥0.18.0`**。
+
+### 现象
+
+- 用启动器「更新 dsh」到 0.1.3-alpha.1（全新 clone，d347e70）后，概览页启动服务器卡"启动中…"，随即 `[launcher] dsh 服务器已退出 (code=1)` + 致命弹窗「尝试恢复」。
+- 环形日志 / `server.console.log` 中的 loader 错误链：
+  `failed to apply loader entry include … failed to import loader entry better-sidebar (dsh-better-sidebar): The requested module '@deepseek-ai/dsh-settings' does not provide an export named 'settingsNamespace'`，
+  底层为旧版 `C:\Users\<user>\.dsh\profiles\web\node_modules\dsh-better-sidebar\lib\index.js` 的 `import { SettingsConflictError, settingsNamespace } from "@deepseek-ai/dsh-settings"`。
+
+### 根因（已实证）
+
+1. **dsh 0.1.3-alpha.1 移除 `@deepseek-ai/dsh-settings` 的 `settingsNamespace` 导出**（设置域 API 变更）；
+2. **`dsh-better-sidebar` <0.18** 仍 import 该名字 → ESM 加载即抛 SyntaxError → cordis include 应用失败 → **boot 中止、进程 code=1**；
+3. 0.18.0 起该 import 已移除（本机 2026-09-04 12:09 `add @latest` 后实测启动恢复正常，12:47 起持续健康运行）。
+
+### 修复方案（按序）
+
+1. `tools\plugin.cmd install dsh-better-sidebar@0.18.0`（或 UI「插件管理 → 更新」）→ 重启 dsh；
+2. 仍失败则临时 `tools\plugin.cmd disable dsh-better-sidebar` 先恢复服务（重启生效）；
+3. 兜底：对 `profiles/web/node_modules/dsh-better-sidebar/lib/index.js` 去掉该 import（会被重装覆盖）。
+
+### 升级 dsh 的行为警告（v0.8.0 起在「更新 dsh」页常驻提示）
+
+- dsh 处于开发者预览阶段，**版本间存在破坏性 API 变更**：Session 事件 API（`.events` → `snapshotEvents()`）、`dsh-settings` 导出、agent-preset 布局等均曾破坏插件/预设；
+- 升级前请确认插件兼容（本机事故即旧 sidebar 撞新 dsh）；升级后若主端异常，**在「管理 dsh → 备用服务器（默认折叠）」部署/启动固定版本备用端进入修复**，不必等主端恢复。
+
+### 探活误判修复（v0.8.0）
+
+- 现象补充：即便服务健康，启动器探活曾只认 HTTP 200，而 dsh web 根路径无 token 返回 **401** → UI 显示"启动中…"/探活红（F3 假象）。
+- v0.8.0 起探活把**任何 HTTP 响应**视为服务在线，`/api/status` 新增 `httpCode`（401/302/200 均属健康）。
+
 ## 更新日志
 
-### v0.7.6 — 全环节 PATH 加固（spawn cmd ENOENT 根因修复 + 全面审计）
-
-- **根因**：Windows 上 Node 的 `spawn`/`execFile` 查找可执行文件**只查 env.PATH**（没有 System32 兜底）——用户 PATH 缺 System32 时连 `cmd.exe` 都解析不到 → `spawn cmd ENOENT`，构建/更新全部失败
-- **三层加固（覆盖所有环节）**：
-  1. **服务器启动自愈**：`ensurePathSanity()` 修补进程自身 PATH（注入 System32 / Windows / 套件 node 目录），一次覆盖本服务器全部 spawn/execFile 点（cmd / netstat / taskkill / powershell / git / pnpm）
-  2. **launcher.cmd / launcher-stop.cmd / setup.cmd**：会话开头 `PATH=%SystemRoot%\System32;%SystemRoot%;%PATH%`，从源头保证（python / node 子进程继承）
-  3. **runStream 用 cmd.exe 全路径**，双保险
-- **插件管理输出 GBK 解码**：plugins.mjs 两处 tee 同步接入 UTF-8→GBK 回退（与 index.mjs 一致），中文插件输出不再乱码
-- 实测：PATH 仅剩套件目录启动 → 自动注入并警告 → env/status/usage/backup 全接口正常；spawn cmd ENOENT 复现与修复均验证
-
-### v0.7.5 — 修复新机器构建报 "'pnpm' 不是内部或外部命令" + 日志 GBK 乱码
-
-- **根因**：环境检查虽能读到套件 pnpm，但**构建子进程的 PATH 里没有 `.runtime\node`**——dsh 根构建脚本内部用裸 `pnpm --filter ...` 调 `build:web`，新机器系统 PATH 无 pnpm 即报错，导致 `pnpm run build` 失败
-- **修复**：新增 `kitEnv()`，所有构建/安装命令（更新/部署/恢复/修复/启动器自更新/服务器启动）统一**把套件 node 目录前置到 PATH**，子进程裸 `pnpm` 一律可解析（实测：无套件 PATH 复现报错，前置后 pnpm 11.7.0 正常）
-- **日志 GBK 乱码修复**：Windows 中文 cmd/pnpm 输出为 GBK，子进程输出改为 UTF-8 优先 + 检测替换符后 **GBK 回退解码**（中文报错可读）
-
-### v0.7.4 — .dshctl 数据目录收敛到启动器目录（按 dsh 本体区分）
-
-- `.dshctl` 不再散落在 dsh 本体目录：会话备份 / 恢复快照 / 启动器日志 / server.console.log 统一收敛到 **`<webui>/.dshctl/<dsh 本体键>/`**（键 = dsh 根目录绝对路径去特殊字符，如 `J__deepseek_harness`、`G__deepseek_harness`，不同 dsh 本体互不混淆）
-- 路径示例：`<webui>/.dshctl/J__deepseek_harness/backups/`、`.../logs/launcher-<时间>.log`、`.../server.console.log`
-- **启动时自动迁移**旧位置 `<dshRoot>/.dshctl` 下的 backups / logs / server.console.log 到新目录（原目录保留可手动删除）
-- 插件安装前的 patch 备份（plugins.mjs）、「打开日志」按钮、设置页说明同步更新
-
-### v0.7.3 — 环境检查 pnpm 解析修复（新机器显示 ?）
-
-- 修复新机器「开发环境」页 pnpm 显示 `?`：环境检查原来只查系统 PATH 的 pnpm（`cmd /c pnpm --version`），新机器 pnpm 只装在套件 `.runtime\node`（setup.cmd 安装）时显示 ?
-- 改为**优先套件便携 pnpm**（`.runtime\node\pnpm.cmd`），系统 PATH 无 pnpm 也能正确显示
-- 「开发环境」页新增 **便携 pnpm (.runtime)** 行，与便携 Node 并列展示
-
-### v0.7.2 — 修复环境构建（全量）+ 更新/拉取后自动全量重建
-
-- **「修复客户端构建」升级为「修复环境构建（全量）」**：随时可点（不再仅在 bundle 异常时出现），clean + 全量构建（含前端 `apps/web/dist` 与全部客户端 bundle），不碰 git；解决 "frontend dist not built" / "bundle script failed to load" / 网页未构建
-- **`setup.cmd` 前端部分改为无条件全量重建**（不再因 node_modules / dist 存在而跳过）：内置更新或外部 git pull 后执行 `setup.cmd` 即 install + build 全量重出，网页不会停留在未构建/旧构建状态
-- **`.update-pending` 收尾补跑 `pnpm run build`**：`launcher_boot.py` 重启收尾从仅 install 升级为 install + build 全量重建
-- 更新页 bundle 健康检查文案同步（含前端 web dist 项）
-
-### v0.7.1 — 启动器日志按启动时间落盘 + dsh 前端 dist 自动补建
-
-- **启动器日志持久化**：每次启动 WebUI 检查并创建日志目录（`dshRoot/.dshctl/logs/`），本次启动的全部日志写入 **`launcher-<启动时间>.log`**（UTF-8，含时间/级别/来源）
-  - 日志目录或文件被删除后**自动重建**（Windows 上已打开的文件被删不会触发错误事件，采用存在性探测 + 节流重建），日志不再丢失
-- **修复 dsh 在全新机器上启动失败**（`web-app: frontend dist not built`）：
-  - 原因：dsh 根目录 `pnpm run build` 不产出前端 `apps/web/dist`，而 `web-app` bundle 启动时强制 require 该 dist
-  - 更新/部署/恢复/修复四条构建路径在 dist 缺失时**自动补跑 `pnpm run build:web`**
-  - 「客户端 bundle 健康检查」新增 `@deepseek-ai/dsh-web-app（前端 dist）` 项，缺失会提示并可一键修复
-
-### v0.7.0 — 用量分析：多模型计价 + 日期级峰谷（周末规则 2026-08-23 起生效）
-
-- **多模型分别计价**（官方定价表，元/百万 token 高峰价）：
-  - `deepseek-v4-flash`：输入 3.0 / 输出 9.0 / 缓存命中 0.1
-  - `deepseek-v4-pro`：输入 9.0 / 输出 27.0 / 缓存命中 0.3
-  - `deepseek-v4-flash-vision-exp`：输入 3.0 / 输出 9.0 / 缓存命中 0.1
-  - `_default` 兜底（未列出的模型）；全部可在页面修改，**数据中出现的新模型自动出现在编辑器**
-  - 新增**模型构成图样**（各模型 tokens 与费用横向条，多模型分别计价显示）
-- **周末规则按日期精确生效**：官方 2026-08-23（周日）00:00 起周末（六/日）全天按空闲价；**此前周末仍分峰谷时段**。新增 `weekendFlatStart` 配置（可自定义生效日期，留空 = 始终生效），计价聚合升级为**日期 × 小时 × 模型**（`byDayHour`），前后数据分别精确计费
-- **日期 × 小时消耗热力**（替换原星期×小时热力）：按真实日期逐行标注峰谷——8/22（周六，规则前）高峰描边、8/23（周日，规则起）周末全天空闲，与官方口径一致
-- 计价编辑器升级：全局（高峰时段增删 / 空闲倍率 / 周末规则开关 + 生效日期）+ 各模型折叠单价编辑 + 「恢复官方默认」
-- 会话级分析同步支持多模型与日期级峰谷（会话 dayHour 桶）
-- 兼容旧版扁平单价配置（自动映射到 `_default`）；`POST /api/usage/pricing` 走 `mergePricing` 深度合并
-- 新 API 字段：`GET /api/usage` 新增 `byModel`、`byDayHour`
-
-### v0.6.3 — 修复 detached HEAD 切换后 pull 失败（无上游追踪）
-
-- 修复 v0.6.2 的遗漏：`checkout -B master` 切回分支后本地分支**暂无上游追踪**，`git pull --ff-only` 仍会失败（"no tracking information"）
-- 更新器改为 **`git pull --ff-only origin master`**（显式指定远端+分支，无需上游配置），并在切回后 best-effort 补设 `branch --set-upstream-to=origin/master`
-
-### v0.6.2 — 启动器更新器修复（detached HEAD + zip 安装模式）
-
-- **修复内置更新器报错** "You are not currently on a branch"：git 安装若处于 **detached HEAD**（如手动 `git checkout <tag>` / 标签检出），更新器现在会自动 `fetch origin` → 校验本地是远程祖先（安全）→ 切回 `master` 分支 → 再 `git pull --ff-only`；与远程分叉时明确报错而非盲目覆盖
-- **兼容 zip 下载构建的安装方式**（无 `.git`）：更新器自动检测安装模式
-  - git 安装：走 git pull 更新
-  - zip 安装：**下载最新 Release 源码包** → Windows 自带 tar 解压 → 在新源码目录 `pnpm install` + `pnpm run build` → **整体替换**启动器目录（保留 `config.json` / `.dshctl` 数据 / `.runtime` 内置运行时）→ 写重启标记，全程不中断当前进程
-- 设置页显示「安装方式」（git 仓库 / zip 源码包），按钮与说明随模式变化
-
-### v0.6.1 — 会话级 Token 分析
-
-- **「用量分析」页新增会话级分析**
-  - **会话费用对比条**：各会话实时费用（峰谷计价）横向对比，最高会话高亮
-  - **会话详情钻取**：点会话行「分析」展开——
-    - Token 构成饼图（缓存命中 / 输入未命中 / 输出 / 缓存写入）
-    - 峰谷账单（高峰 / 空闲 / 合计 / 相对全高峰节省，随单价实时重算）
-    - 24 小时消耗分布（高峰时段高亮）
-    - 元信息：模型 / 时长 / 起止时间 / usage 事件数
-  - 会话表「费用」列改为**峰谷实时计算**，并新增缓存读列
-- 后端 `GET /api/usage` 的 `bySession` 增加 `events` / `firstTs` / `hourWeek`（会话内 168 桶聚合，供前端实时计费）
-
-### v0.6.0 — 用量分析（Token 消耗图 + 峰谷计费账单）
-
-- **新增「用量分析」页**：Token 消耗可视化与峰谷计费
-  - **Token 构成饼图**（conic-gradient）：缓存命中输入 / 输入(未命中) / 输出 / 缓存写入，悬浮与图例显示数量、占比、单价
-  - **峰谷账单**：按「星期×小时」聚合（168 桶）实时计费——高峰费用 / 空闲费用 / 相对全高峰节省 / 高峰 token 占比；**单价、峰谷时段、空闲倍率、周末规则修改后账单立即重算**
-  - **30 天消耗柱状图**（输入+输出）+ **24 小时消耗分布**（高峰时段橙色高亮，悬浮显示各类 tokens）
-  - **星期 × 小时消耗热力**（168 格，峰值格子描边，周末行标注空闲价）
-  - **GitHub 风格热力图**（近 365 天，按日用量分级着色，悬浮显示日期/tokens/费用）
-  - 统计卡：总费用 / 输入 / 输出 / 缓存读取 / 会话数 / 活跃天数
-  - 最近 30 天明细表 + 会话明细（项目/模型/输入/输出/费用）
-- **峰谷计价默认值取自 DeepSeek 官方定价文档**（[api-docs.deepseek.com/zh-cn/quick_start/pricing](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)）：
-  - 高峰时段 9:00-12:00 / 14:00-18:00（北京时间）；空闲 = 高峰 × 0.5；周末（周六/日）全天按空闲价（2026-08-23 起）
-  - deepseek-v4-flash 高峰价：输入 ¥3 / 输出 ¥9 / 缓存命中 ¥0.1 / 缓存写入 ¥3（元/百万 token）
-  - 全部可在页面修改并持久化到 config.json（`POST /api/usage/pricing`）
-- 数据源：`DSH_HOME/sessions/**/session.jsonl.zstd`（zstd 多帧解压，移植 dsh 帧扫描；Node `node:zlib` 零依赖）
-- 新 API：`GET /api/usage`（新增 `byHourWeek` 168 桶聚合）、`POST /api/usage/pricing`
-
-### v0.5.2 — 修复会话备份 cpSync 未定义
-
-- **修复会话备份失败**（"cpSync is not defined"）：`server/index.mjs` 的 `node:fs` 导入缺失 `cpSync`/`rmSync`，导致备份与删除备份报错；已补全导入并实测（真实会话文件备份 files/size 正确、删除记录正常）
-
-### v0.5.1 — 启动逻辑脚本化（修复 launcher.cmd 闪退）
-
-- **修复 launcher.cmd 闪退**（"... was unexpected at this time"）：`.update-pending` 收尾段的 cmd 括号块变量预展开崩溃
-- **启动逻辑全部移入 `tools/launcher_boot.py`**：更新收尾 / 已运行检测 / node 选择 / 端口解析 / 停止（--stop）全部 Python 承载，`launcher.cmd` / `launcher-stop.cmd` 仅负责调用（纯 ASCII+CRLF + goto 结构，规避 cmd 语法坑）
-
-### v0.5.0 — 启动器设置、启动器自更新、会话备份与插件更新分级
-
-- **新增「设置」页**：dsh 端口 / WebUI 端口 / profile 参数（下次启动生效）；检查启动器更新（版本对比 + 更新内容）；**会话备份记录**（时间/原因/手动备份/删除）
-- **启动器分步更新**：git pull → install → build（前端即时生效）→ 写 `.update-pending` 标记 → 提示重启；`launcher.cmd` 重启时自动收尾（补依赖 + 清标记）；全程不中断当前进程
-- **会话备份保护**：dsh 升级与插件安装/更新/卸载前**自动备份 `~/.dsh/sessions`**（`.dshctl/backups/sessions-<ts>/` + `backups.json` 记录），设置页可查看/手动备份/删除
-- **插件更新分级路径**：npx 安装无需手动更新；源码构建（workspace 包）随 dsh 更新；用户安装走 `dsh plugin update`；better-sidebar 按 README 用 `add @latest`；**dsh-routing-suite 暂不更新**
-- **升级后兼容性验证**：dsh 更新完成后自动启动 dsh → HTTP 探活 → 停止，确认插件兼容性
-- **破坏性更新警告**：更新页提示 dsh 预览版阶段存在破坏性更新，贸然升级可能造成致命影响；插件管理页提示操作前自动备份会话（插件市场如 dsh-plugin-hub 安装的插件同样列出，可禁用/卸载）
-- 新 API：`GET /api/launcher/check`、`POST /api/launcher/update`、`POST /api/backup`、`GET /api/backup/list`、`POST /api/backup/delete`、`POST /api/plugins/update`
-- 修复 pnpm 11 脚本预检卡住（`verifyDepsBeforeRun: false`）
-
-### v0.4.3 — 日志滚动修复与白天主题
-
-- **修复日志刷新把页面拉到底**：自动滚动改为只滚动日志列表自身容器（不再用 scrollIntoView 影响外层页面）
-- **新增白天/黑夜主题切换**：顶栏「白天/黑夜」按钮，CSS 变量主题化（深色默认 + `[data-theme="light"]` 浅色覆盖），localStorage 持久化
-- 日志/事件区、弹窗、渐变背景等全部变量化，两主题一致观感
-
-### v0.4.2 — 事件管理器与致命错误恢复
-
-- **新增「事件管理器」页**：事件记录（info 不标注 / warn 黄 / error 红，级别过滤 + 计数）；打开日志文件夹（`.dshctl\`）
-- **致命错误弹窗**：dsh 服务器异常退出 / 更新失败 / 插件安装失败 → 终止错误进程 + 弹窗（查看日志 / 尝试恢复 / 稍后处理）
-- **智能恢复**：更新错误 → 回退更新前版本 + clean 全量重建 + bundle 校验；插件错误 → 卸载插件 + 还原 patch.yml 备份
-- **恢复快照持久化**：`.dshctl\backups\lastop.json`，后端重启后仍可恢复
-- 新 API：`GET /api/events/list`、`POST /api/recover`、`/api/open {target:"logs"}`
-- 日志面板按事件级别着色（错误红 / 警告黄）
-
-### v0.4.1 — 搜索改进与特殊插件扩展
-
-- **搜索重写**：候选池（@deepseek-ai scope）+ 本地过滤，支持**精确搜索**（完整包名完全匹配，如 `dsh-bash-sandbox`）与**模糊搜索**（名称/描述包含，如 `sandbox` 返回全部 sandbox 系列），精确命中排最前
-- **新增特殊插件 dsh-better-sidebar**（[GitHub](https://github.com/omdsh-dev/DSH-better-sidebar)）：VSCode 风格侧边栏工作台，npm 独立安装、无需修补
-- 特殊插件卡片按各自安装方式调用（routing-suite 走特殊修复流程，better-sidebar 走 npm）
-
-### v0.4.0 — 插件管理
-
-- **新增「插件管理」页**：列出已安装插件与本体自带插件（本体不可修改，后端强制保护）；禁用/启用（cordis.patch.yml）/卸载（dsh plugin remove）
-- **npm 搜索安装**：关键词搜索 `@deepseek-ai/` 系列插件并一键安装；自动处理 pnpm 构建脚本拦截（allowBuilds + 重试）
-- **特殊插件 dsh-routing-suite**：注入器 + 思维模式路由预设一键安装，内置二次修复（预构建注入器、子模块、预设平铺、YAML 引号修复）
-- 「部署 dsh」更名「**管理 dsh**」
-- 新 API：`GET /api/plugins`、`GET /api/plugins/search`、`POST /api/plugins/install|toggle|remove`
-- 插件管理全程操作**当前 DSH_HOME**（隔离调试：测试 dsh 本体 + 测试 DSH_HOME）
-
-### v0.3.2 — 目录选择器与检查稳定性
-
-- **新增 Windows 原生文件夹选择器**：部署目录、DSH_HOME 数据目录均可点「浏览…」弹出系统文件夹对话框选择，选完自动填入并立即检查（`POST /api/pick-dir`，FolderBrowserDialog）
-- **修复部署页检查被轮询覆盖**：手动检查指定目录后不再被 3s 状态轮询覆盖回默认 dshRoot（自动检查仅跟随 dshRoot 配置变化触发）
-
-### v0.3.1 — 数据目录 DSH_HOME 可独立选取
-
-- **新增 `dshHome` 配置**：`.dsh` 可放在项目目录（如 `dshRoot\.dsh`）或任意独立目录，不再局限于用户文件夹
-- 后端 spawn dsh 时注入 `DSH_HOME`（dsh 官方 `home-paths`：显式配置 > `$DSH_HOME` > `~/.dsh`）；相对路径相对 dshRoot 解析，支持 `~` 展开
-- UI：「概览 → 数据目录 DSH_HOME」输入/保存/恢复默认；`tools\plugin.py` 同步跟随
-- 新增 CLI：`--dsh-home <path>`（`default` 恢复默认）；API `/api/config` 支持 `dshHome`
-
-### v0.3.0 — 更新管理与修复（本次）
-
-- **新增「更新 dsh」独立页面**：检查更新（同步 GitHub Releases 与更新内容）、版本选择升级（默认最新）、更新到最新 master
-- **更新流程工程保护**：更新前自动停服（非启动器进程占用则拒绝）；版本切换后 `pnpm run clean` 强制全量重建；构建后客户端 bundle 健康校验
-- **新增「修复客户端构建」**（`/api/update/repair`）：一键解决 "bundle script failed to load"（clean + install + 全量 build + 校验）
-- 新增 API：`GET /api/update/check`、`POST /api/update/apply`、`POST /api/update/repair`
-- 更新页显示 bundle 健康条（缺失红条 + 修复按钮）
-
-### v0.2.0 — 便携套件化 + 一键部署
-
-- 套件自包含：`.runtime\node`（便携 Node + pnpm）、`.runtime\python` + venv（便携 Python + pyyaml）
-- dsh 本体独立存放（默认 `../deepseek_harness`），UI 支持目录检查/切换
-- **一键部署 dsh**（`/api/deploy`）：clone + install + build 全自动，成功自动切换 dshRoot
-- `setup.cmd` 新机器引导（幂等）；`launcher.cmd` 支持 `--port` / `--web-port` / `--profile`；`tools\plugin.py` 插件管理
-- 修复：批处理中文编码闪退（改纯 ASCII + CRLF）、日志文件被占用导致后端崩溃（尽力而为写盘 + 异常兜底）
-
-### v0.1.0 — MVP
-
-- 服务器启停/重启 + HTTP 探活、实时日志（SSE）、环境信息、一键打开 Web UI/仓库/VSCode
-- 深色玻璃拟态 UI：概览页 + 状态胶囊 + 日志面板（过滤/跟随/清空）
+版本历史已独立成文：[UPDATE.md](UPDATE.md)（v0.8.0 → v0.1.0，含故障修复说明与变更记录）。
 
 ## 安全与说明
 
 - 后端仅监听 `127.0.0.1`，无外部暴露面；停止服务器用 `taskkill /T /F` 清理进程树并以端口兜底
-- `.runtime\`、`node_modules\`、`dist\`、`dsh-test\` 已 gitignore，套件根可整体压缩分发
+- `.runtime\`、`node_modules\`、`dist\`、`dsh-test\`、`.dsh_temp\` 已 gitignore，套件根可整体压缩分发
 - 后端零运行时依赖：运行只需 `.runtime\node\node.exe` + `server\index.mjs` + `dist\`，无 `node_modules` 也能跑
+- 文档不含用户名/凭据/token：路径均为安装示例，用户名一律以 `<user>` 占位；本机个人配置（`config.json`、`.dshctl/`）与备用端数据（`.dsh_temp/`）不入库
+- 版本历史见 [UPDATE.md](UPDATE.md)（v0.8.0 → v0.1.0，含故障修复说明与变更记录）

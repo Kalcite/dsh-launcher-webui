@@ -41,7 +41,7 @@ export function ServerCard({ status, busy, onAction, onOpen }: Props) {
             <Activity size={13} /> 状态
           </span>
           <span className={`stat-value ${s?.httpOk ? "ok" : s?.running ? "warn" : ""}`}>
-            {s?.running ? (s.httpOk ? "运行中 · HTTP 200" : "启动中…") : "已停止"}
+            {s?.running ? (s.httpOk ? `运行中 · HTTP ${s.httpCode ?? "OK"}` : "启动中…") : "已停止"}
           </span>
         </div>
         <div className="stat">

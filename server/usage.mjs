@@ -127,13 +127,19 @@ async function decompressSessionLog(buf) {
 
 /* ------------------------------ 解析 ------------------------------ */
 
+/**
+ * usage 记账两种载体（dsh 0.1.3-alpha.1 起并存，按会话取最高版本文件读取）：
+ * - v0 流式日志 `session.jsonl.zstd`：assistant/chunk 行 `data.chunk.usage`（chunk.type === "usage"）
+ * - v2 持久日志 `session.v2.jsonl.zstd`：assistant/message 行 `data.usage`（同 token 字段）
+ */
 function parseUsageLine(line) {
   let j;
   try { j = JSON.parse(line); } catch { return null; }
-  // usage 事件位于 assistant/chunk 行的 data.chunk.usage（或兼容 chunk.usage）
+  let u = null;
   const chunk = j?.data?.chunk ?? j?.chunk;
-  if (!chunk || chunk.type !== "usage" || !chunk.usage) return null;
-  const u = chunk.usage;
+  if (chunk && chunk.type === "usage" && chunk.usage) u = chunk.usage; // v0 流式
+  else if (j?.data?.usage && typeof j.data.usage === "object") u = j.data.usage; // v2 durable
+  if (!u) return null;
   const ts = typeof j.time === "number" ? j.time : typeof j.ts === "number" ? j.ts : null;
   return {
     ts,
@@ -160,6 +166,30 @@ function dayKey(ts) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+/** 会话日志文件名 → 格式版本：session.jsonl.zstd = 0；session.v2.jsonl.zstd = 2；非日志名返回 null */
+function sessionLogVersion(name) {
+  const m = /^session(?:\.v(\d+))?\.jsonl(?:\.zstd)?$/.exec(name);
+  if (!m) return null;
+  return m[1] ? Number(m[1]) : 0;
+}
+
+/**
+ * 会话目录内挑选要读取的日志：取版本最高者（v2 覆盖 v0/v1，迁移 tmp / 生成计数文件一律忽略）。
+ * 同版本同时存在 .zstd 与明文时优先 .zstd。
+ */
+function pickSessionLog(dir) {
+  let best = null; // { name, version, file }
+  for (const name of readdirSync(dir)) {
+    const v = sessionLogVersion(name);
+    if (v === null) continue;
+    const file = path.join(dir, name);
+    if (!best || v > best.version || (v === best.version && name.endsWith(".zstd"))) {
+      best = { name, version: v, file };
+    }
+  }
+  return best;
+}
+
 function walkSessions(home) {
   const root = path.join(home, "sessions");
   const files = [];
@@ -170,13 +200,8 @@ function walkSessions(home) {
     for (const sid of readdirSync(projectDir)) {
       const sessionDir = path.join(projectDir, sid);
       if (!statSync(sessionDir).isDirectory()) continue;
-      for (const name of ["session.jsonl.zstd", "session.jsonl"]) {
-        const f = path.join(sessionDir, name);
-        if (existsSync(f)) {
-          files.push({ file: f, project, sid });
-          break;
-        }
-      }
+      const picked = pickSessionLog(sessionDir);
+      if (picked) files.push({ file: picked.file, project, sid, version: picked.version });
     }
   }
   return files;

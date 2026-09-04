@@ -31,6 +31,7 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import * as plugins from "./plugins.mjs";
 import * as usage from "./usage.mjs";
+import * as standby from "./standby.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LAUNCHER_ROOT = path.resolve(__dirname, "..");
@@ -137,6 +138,33 @@ const state = {
   envCacheAt: 0
 };
 const sseClients = new Set();
+
+/* ------------------------------ 备用服务器状态（.dsh_temp/dsh 固定版本，独立于主 dsh） ------------------------------ */
+
+const sbState = {
+  proc: null,
+  startedAt: null,
+  busy: false, // 备用端启停/部署操作互斥
+  stopping: false
+};
+
+/** 备用端模块 ctx：路径/状态/进程/日志全部注入（网络与 git 经 runStream/run 执行） */
+const sbCtx = {
+  LAUNCHER_ROOT,
+  cfg,
+  paths: () => standby.standbyPaths(LAUNCHER_ROOT, cfg),
+  log: (line, level = "info", source = "launcher") => pushLog(line, level, source),
+  runStream: (cmd, args, opts) => runStream(cmd, args, opts),
+  kitNodeExe: () => kitNodeExe(),
+  kitPnpm: () => kitPnpmCmd(),
+  kitEnv: () => kitEnv(),
+  ensureWebDist: (root, pnpm) => ensureWebDist(root, pnpm, "standby"),
+  portPids: (port) => portPids(port),
+  probeHttp,
+  readdirSafe: (p) => readdir(p).catch(() => []),
+  gitHead,
+  state: sbState
+};
 
 /* ------------------------------ dsh 数据目录（统一收敛到 webui 目录下的 .dshctl，按 dsh 本体区分） ------------------------------ */
 
@@ -354,6 +382,20 @@ function openUrl(url) {
   execFile("cmd", ["/c", "start", "", url], { windowsHide: true, detached: true }, () => {});
 }
 
+/**
+ * 打开 dsh Web UI（带 token）：dsh web 根路径无 token 返回 401，因此优先用
+ * 该服务器 console 日志里打印的 `http://127.0.0.1:<port>/?token=...` 完整地址，缺省回退裸地址。
+ */
+function openWebUrl(consoleLogFile, port) {
+  let url = `http://127.0.0.1:${port}`;
+  try {
+    const raw = readFileSync(consoleLogFile, "utf8");
+    const m = raw.match(new RegExp(`http://127\\.0\\.0\\.1:${port}/\\?token=[A-Za-z0-9_-]+`));
+    if (m) url = m[0];
+  } catch { /* 无日志则用裸地址 */ }
+  openUrl(url);
+}
+
 /** 列出监听某端口的 PID（netstat 解析，兼容 Windows） */
 function portPids(port) {
   return new Promise((resolve) => {
@@ -379,11 +421,13 @@ function killTree(pid) {
 function probeHttp(port) {
   return new Promise((resolve) => {
     const req = http.get({ host: "127.0.0.1", port, path: "/", timeout: 2500 }, (res) => {
-      resolve(res.statusCode === 200);
+      // dsh web 根路径带 token 鉴权（401）或重定向（302/307）——任何 HTTP 响应都代表服务在线；
+      // 只认 200 会把健康服务误判为探活失败（UI 卡"启动中…"假象的来源之一）
+      resolve({ ok: true, code: res.statusCode });
       res.resume();
     });
-    req.on("timeout", () => { req.destroy(); resolve(false); });
-    req.on("error", () => resolve(false));
+    req.on("timeout", () => { req.destroy(); resolve({ ok: false, code: null }); });
+    req.on("error", () => resolve({ ok: false, code: null }));
   });
 }
 
@@ -493,6 +537,20 @@ async function detectBranch(root) {
   const r = await run("git", ["-C", root, "branch", "-r"]);
   if (r.ok && /origin\/main/.test(r.out)) return "main";
   return "master";
+}
+
+/** git 头部信息：{commit, subject, describe(tag)}（用于备用端版本标记/登记） */
+function gitHead(root) {
+  return new Promise((resolve) => {
+    run("git", ["-C", root, "log", "-1", "--format=%h|%s"]).then((r) => {
+      if (!r.ok) return resolve(null);
+      const [commit = "", subject = ""] = String(r.out || "").trim().split("|");
+      run("git", ["-C", root, "describe", "--tags", "--exact-match", "HEAD"]).then((r2) => {
+        const tag = r2.ok && String(r2.out || "").trim() ? String(r2.out).trim() : null;
+        resolve({ commit, subject, describe: tag });
+      }).catch(() => resolve({ commit, subject, describe: null }));
+    }).catch(() => resolve(null));
+  });
 }
 
 async function deployStatus(root) {
@@ -1158,11 +1216,17 @@ async function serverStatus() {
   const pids = await portPids(cfg.webPort);
   const running = pids.length > 0;
   let httpOk = false;
-  if (running) httpOk = await probeHttp(cfg.webPort);
+  let httpCode = null;
+  if (running) {
+    const h = await probeHttp(cfg.webPort);
+    httpOk = h.ok === true;
+    httpCode = h.code ?? null;
+  }
   const logFile = dshDataDir("server.console.log");
   return {
     running,
     httpOk,
+    httpCode,
     port: cfg.webPort,
     profile: cfg.profile ?? "web",
     pid: state.proc ? state.proc.pid : pids[0] ?? null,
@@ -1283,6 +1347,96 @@ async function stopServer() {
   }
 }
 
+/* ------------------------------ 备用服务器生命周期（独立 DSH_HOME + 固定版本；不触发致命弹窗） ------------------------------ */
+
+async function sbStartServer() {
+  if (sbState.busy) return { ok: false, error: "备用端已有操作在执行，请稍候" };
+  if (sbState.proc) return { ok: true, already: true };
+  const p = sbCtx.paths();
+  if (!existsSync(p.binPath)) {
+    return { ok: false, error: `备用 dsh 未部署（${p.root}），请先「一键部署备用端」` };
+  }
+  const busyPids = await portPids(p.port);
+  if (busyPids.length > 0) {
+    return { ok: false, error: `备用端口 ${p.port} 已被占用 (PID ${busyPids.join(",")})` };
+  }
+  sbState.busy = true;
+  await mkdir(path.dirname(p.consoleLog), { recursive: true }).catch(() => {});
+  let stream = null;
+  try {
+    stream = createWriteStream(p.consoleLog, { flags: "w" });
+    stream.on("error", (err) => pushLog(`[standby] 日志文件不可写（${err.message}），改用内存缓冲`));
+  } catch { /* 同上 */ }
+
+  const args = ["--import", "tsx/esm", p.binPath, "--profile", p.profile, "--port", String(p.port)];
+  pushLog(`[standby] 启动备用 dsh web → 端口 ${p.port}（profile: ${p.profile}，cwd: ${p.root}，DSH_HOME: ${p.home}）`);
+  pushLog(`[standby] ${process.execPath} ${args.join(" ")}`);
+  const proc = spawn(process.execPath, args, {
+    cwd: p.root,
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: kitEnv({ ...process.env, DSH_HOME: p.home })
+  });
+  sbState.proc = proc;
+  sbState.startedAt = new Date().toISOString();
+
+  const tee = (chunk, prefix) => {
+    const text = decodeChunk(chunk);
+    if (stream) stream.write(text);
+    for (const line of text.split(/\r?\n/)) {
+      if (line.trim()) pushLog(prefix ? `[standby] ${prefix} ${line}` : `[standby] ${line}`);
+    }
+  };
+  proc.stdout.on("data", (d) => tee(d, ""));
+  proc.stderr.on("data", (d) => tee(d, "[stderr]"));
+
+  proc.on("error", (err) => pushLog(`[standby] 子进程启动失败: ${err.message}`, "error", "server"));
+  proc.on("exit", (code, signal) => {
+    const byStop = sbState.stopping === true;
+    const abnormal = !byStop && code !== 0 && code !== null;
+    pushLog(`[standby] 备用 dsh 服务器已退出 (code=${code}${signal ? ` signal=${signal}` : ""})`, abnormal ? "error" : "info", "server");
+    if (stream) stream.end();
+    sbState.proc = null;
+    sbState.startedAt = null;
+    // 备用端不弹致命错误窗（仅记录+刷新）；主端维护入口在备用端不可用时显式提示
+    broadcast({ type: "refresh" });
+  });
+
+  sbState.busy = false;
+  return { ok: true, standby: { port: p.port, url: p.webUrl } };
+}
+
+async function sbStopServer() {
+  if (sbState.busy) return { ok: false, error: "备用端已有操作在执行，请稍候" };
+  sbState.busy = true;
+  sbState.stopping = true;
+  const p = sbCtx.paths();
+  try {
+    if (sbState.proc) {
+      pushLog(`[standby] 停止备用 dsh 服务器 (taskkill PID ${sbState.proc.pid} /T /F)`);
+      await killTree(sbState.proc.pid);
+    }
+    const pids = await portPids(p.port);
+    for (const pid of pids) await killTree(pid);
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+      if ((await portPids(p.port)).length === 0) break;
+      await sleep(300);
+    }
+    const free = (await portPids(p.port)).length === 0;
+    pushLog(free ? "[standby] 备用服务器已停止，端口已释放" : `[standby] 警告：备用端口 ${p.port} 仍在占用`, free ? "info" : "warn");
+    return { ok: free, error: free ? undefined : `备用端口 ${p.port} 未能释放` };
+  } finally {
+    sbState.stopping = false;
+    sbState.busy = false;
+  }
+}
+
+async function sbRestartServer() {
+  await sbStopServer();
+  return sbStartServer();
+}
+
 /* ------------------------------ HTTP ------------------------------ */
 
 function sendJson(res, obj, code = 200) {
@@ -1368,7 +1522,23 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
   const p = url.pathname;
   try {
-    if (req.method === "GET" && p === "/api/status") return sendJson(res, await serverStatus());
+    if (req.method === "GET" && p === "/api/status") {
+      const s = await serverStatus();
+      const sp = sbCtx.paths();
+      // 备用端摘要（轻量；详情走 /api/standby/status）
+      s.standby = {
+        deployed: existsSync(sp.binPath),
+        distOk: existsSync(sp.webDist),
+        provisioned: existsSync(path.join(sp.home, "profiles", sp.profile, "package.json")),
+        running: (await portPids(sp.port)).length > 0,
+        port: sp.port,
+        tag: sp.tag,
+        root: sp.root,
+        home: sp.home,
+        busy: sbState.busy
+      };
+      return sendJson(res, s);
+    }
     if (req.method === "GET" && p === "/api/env") return sendJson(res, await envInfo());
     if (req.method === "GET" && p === "/api/logs") return handleLogs(res, url);
     if (req.method === "GET" && p === "/api/events") return handleEvents(req, res);
@@ -1449,11 +1619,41 @@ const server = http.createServer(async (req, res) => {
       await stopServer();
       return sendJson(res, await startServer());
     }
+
+    // ══ 备用服务器（.dsh_temp/dsh 固定版本 + 独立 DSH_HOME；与主 dsh 互不影响、不触发致命弹窗）══
+    if (req.method === "GET" && p === "/api/standby/status") {
+      return sendJson(res, await standby.sbStatus(sbCtx));
+    }
+    const sbAsync = (fn, phase) => {
+      sbState.busy = true;
+      Promise.resolve()
+        .then(() => fn())
+        .then((r) => broadcast({ type: "deploy", mode: "standby", action: "standby", phase, ...r }))
+        .catch((e) => broadcast({ type: "deploy", mode: "standby", action: "standby", phase, ok: false, error: String(e?.message ?? e) }))
+        .finally(() => { sbState.busy = false; broadcast({ type: "refresh" }); });
+    };
+    if (req.method === "POST" && p === "/api/standby/bootstrap") {
+      if (sbState.busy) return sendJson(res, { ok: false, error: "备用端已有操作在执行，请稍候" });
+      const body = await readBody(req);
+      sbAsync(() => standby.sbBootstrap(sbCtx, body ?? {}), "bootstrap");
+      return sendJson(res, { ok: true, started: true });
+    }
+    if (req.method === "POST" && p === "/api/standby/provision") {
+      if (sbState.busy) return sendJson(res, { ok: false, error: "备用端已有操作在执行，请稍候" });
+      sbAsync(() => standby.sbProvision(sbCtx), "provision");
+      return sendJson(res, { ok: true, started: true });
+    }
+    if (req.method === "POST" && p === "/api/standby/start") return sendJson(res, await sbStartServer());
+    if (req.method === "POST" && p === "/api/standby/stop") return sendJson(res, await sbStopServer());
+    if (req.method === "POST" && p === "/api/standby/restart") {
+      await sbStopServer();
+      return sendJson(res, await sbStartServer());
+    }
     if (req.method === "POST" && p === "/api/open") {
       const body = await readBody(req);
       const target = body?.target ?? "web";
       const map = {
-        web: () => openUrl(`http://127.0.0.1:${cfg.webPort}`),
+        web: () => openWebUrl(dshDataDir("server.console.log"), cfg.webPort),
         folder: () => execFile("cmd", ["/c", "start", "", cfg.dshRoot], { windowsHide: true, detached: true }, () => {}),
         vscode: () => execFile("cmd", ["/c", "start", "", "code", cfg.dshRoot], { windowsHide: true, detached: true }, () => {}),
         // 打开日志目录（webui/.dshctl/<dsh>/，含 launcher 日志与 server.console.log）
@@ -1461,6 +1661,18 @@ const server = http.createServer(async (req, res) => {
           const logsDir = dshDataDir();
           mkdirSync(logsDir, { recursive: true });
           execFile("cmd", ["/c", "start", "", logsDir], { windowsHide: true, detached: true }, () => {});
+        },
+        // 备用端（固定版本 + 独立用户目录）
+        standbyWeb: () => openWebUrl(sbCtx.paths().consoleLog, sbCtx.paths().port),
+        standbyFolder: () => {
+          const d = sbCtx.paths().root;
+          mkdirSync(d, { recursive: true });
+          execFile("cmd", ["/c", "start", "", d], { windowsHide: true, detached: true }, () => {});
+        },
+        standbyLogs: () => {
+          const d = path.dirname(sbCtx.paths().consoleLog);
+          mkdirSync(d, { recursive: true });
+          execFile("cmd", ["/c", "start", "", d], { windowsHide: true, detached: true }, () => {});
         }
       };
       const fn = map[target];

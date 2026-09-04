@@ -122,6 +122,17 @@ export function UpdateCard({ busy, setBusy, deployResult }: Props) {
         </span>
       </div>
 
+      {/* 版本组合与备用端提示（v0.8.0+） */}
+      <div className="notice-banner" style={{ marginBottom: 14 }}>
+        <span>
+          <AlertTriangle size={13} /> 当前登记组合：dsh <strong>dsh-v0.1.3-alpha.1</strong> ↔ 启动器 v0.8+ ↔ 插件{" "}
+          <strong>dsh-better-sidebar@≥0.18</strong>（已移除对 <code>settingsNamespace</code> 的依赖）。
+          升级前请确认：① 插件与新版 dsh 兼容（2026-09-04 事故：旧版 sidebar 在新版 dsh 上<strong>启动即退 code=1</strong>）；
+          ② Router 预设需经 v0.7.7+ 重装以适配 Session API；③ 升级后若主端异常，可在「概览 → 备用服务器」启动固定版本{" "}
+          <code>dsh-v0.1.3-alpha.1</code> 的备用端进入修复（vibecoding 式自愈，不依赖主端可用）。
+        </span>
+      </div>
+
       {/* 当前版本 */}
       <div className="deploy-status">
         <div className="drow">
